@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useState, ReactNode } from "react
 import { supabase } from "@/integrations/supabase/client";
 import type { User, Session } from "@supabase/supabase-js";
 
+const DEMO_USER_EMAIL = "demo@example.com";
+
 interface AuthContextType {
   user: User | null;
   session: Session | null;
@@ -19,17 +21,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const syncAuthState = (session: Session | null, user: User | null) => {
+    setSession(session);
+    setUser(user);
+    setLoading(false);
+  };
+
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      setLoading(false);
+      const user = (session?.user as User | undefined) ?? null;
+      syncAuthState(session ?? null, user);
     });
 
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      setLoading(false);
+      const user = (session?.user as User | undefined) ?? null;
+      syncAuthState(session ?? null, user);
     });
 
     return () => subscription.unsubscribe();
@@ -48,7 +54,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (!error && data.session) {
+      const demoUser = {
+        id: data.session.user?.id ?? "demo-user-id",
+        email: data.session.user?.email ?? DEMO_USER_EMAIL,
+        app_metadata: {},
+        user_metadata: {},
+        aud: "authenticated",
+        created_at: new Date().toISOString(),
+      } as User;
+      syncAuthState(data.session as Session, demoUser);
+    }
     return { error: error?.message ?? null };
   };
 

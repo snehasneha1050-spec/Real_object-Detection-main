@@ -8,10 +8,85 @@ const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 
-export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
-  auth: {
-    storage: localStorage,
-    persistSession: true,
-    autoRefreshToken: true,
+type SupabaseClientLike = ReturnType<typeof createClient<Database>>;
+
+function createFallbackSupabaseClient(): SupabaseClientLike {
+  let currentSession: { user: { email: string; id: string }; access_token: string } | null = null;
+
+  const createDemoSession = (email: string) => ({
+    user: {
+      id: 'demo-user-id',
+      email,
+      app_metadata: {},
+      user_metadata: {},
+      aud: 'authenticated',
+      created_at: new Date().toISOString(),
+    },
+    access_token: 'demo-access-token',
+    refresh_token: 'demo-refresh-token',
+    token_type: 'bearer',
+    expires_in: 3600,
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+  });
+
+  return {
+    auth: {
+      onAuthStateChange: (callback: (event: string, session: unknown) => void) => ({
+        data: {
+          subscription: {
+            unsubscribe: () => undefined,
+          },
+        },
+      }),
+      getSession: async () => ({
+        data: { session: currentSession ? { ...currentSession, user: currentSession.user } : null },
+      }),
+      signUp: async ({ email }: { email?: string } = {}) => {
+        if (email) {
+          currentSession = createDemoSession(email) as typeof currentSession;
+        }
+        return {
+          data: { user: currentSession?.user ?? null, session: currentSession ?? null },
+          error: null,
+        };
+      },
+      signInWithPassword: async ({ email }: { email?: string } = {}) => {
+        if (email) {
+          currentSession = createDemoSession(email) as typeof currentSession;
+        }
+        return {
+          data: { user: currentSession?.user ?? null, session: currentSession ?? null },
+          error: null,
+        };
+      },
+      signOut: async () => {
+        currentSession = null;
+        return { error: null };
+      },
+      resetPasswordForEmail: async () => ({
+        data: {},
+        error: null,
+      }),
+      updateUser: async () => ({
+        data: { user: currentSession?.user ?? null },
+        error: null,
+      }),
+    },
+  } as unknown as SupabaseClientLike;
+}
+
+export function createSupabaseClient(): SupabaseClientLike {
+  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+    return createFallbackSupabaseClient();
   }
-});
+
+  return createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+    auth: {
+      storage: localStorage,
+      persistSession: true,
+      autoRefreshToken: true,
+    },
+  });
+}
+
+export const supabase = createSupabaseClient();
