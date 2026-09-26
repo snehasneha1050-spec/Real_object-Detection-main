@@ -5,7 +5,15 @@ import { saveDetection } from "@/lib/detectionStore";
 import { getSettings } from "@/lib/settingsStore";
 import { playClickSound } from "@/lib/settingsStore";
 import { SimpleTracker, TrackedDetection } from "@/lib/tracker";
-import { detector, Detection, initializeTensorFlow, isTensorFlowReady, detectObjects } from "@/lib/tensorflow";
+import {
+  detector,
+  Detection,
+  initializeTensorFlow,
+  isTensorFlowReady,
+  detectObjects,
+  classifyObjects,
+  DetailedClassification,
+} from "@/lib/tensorflow";
 import ObjectSearchBar from "@/components/ObjectSearchBar";
 import VoiceCommandButton from "@/components/VoiceCommandButton";
 import { VoiceCommandResult } from "@/hooks/useVoiceCommands";
@@ -24,9 +32,11 @@ export default function DetectionPage() {
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [imageDetecting, setImageDetecting] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
+  const [detailedItems, setDetailedItems] = useState<DetailedClassification[]>([]);
   const animFrameRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
   const lastSaveRef = useRef<number>(0);
+  const lastClassifyRef = useRef<number>(0);
   const trackerRef = useRef(new SimpleTracker());
   const searchFilterRef = useRef(searchFilter);
   searchFilterRef.current = searchFilter;
@@ -84,6 +94,7 @@ export default function DetectionPage() {
     }
     if (videoRef.current) videoRef.current.srcObject = null;
     setDetections([]);
+    setDetailedItems([]);
     setFps(0);
     trackerRef.current.reset();
   }, []);
@@ -127,6 +138,16 @@ export default function DetectionPage() {
           setFps(frameCount);
           frameCount = 0;
           lastTime = now;
+        }
+
+        // Periodically run detailed classification for 1000+ daily items (e.g. pen, watch, notebook)
+        if (now - lastClassifyRef.current > 1200) {
+          lastClassifyRef.current = now;
+          classifyObjects(video, 3).then((res) => {
+            if (res && res.length > 0) {
+              setDetailedItems(res);
+            }
+          });
         }
 
         // Save detections periodically
@@ -197,6 +218,13 @@ export default function DetectionPage() {
       setObjectCount(tracked.length);
 
       drawDetections(ctx, tracked, false, searchFilterRef.current);
+
+      // Classify everyday items from image
+      classifyObjects(img, 3).then((res) => {
+        if (res && res.length > 0) {
+          setDetailedItems(res);
+        }
+      });
 
       // Save
       tracked.forEach((d) => {
@@ -319,6 +347,21 @@ export default function DetectionPage() {
                 </button>
 
                 <div className="flex items-center gap-2 w-full sm:w-auto sm:ml-auto mt-2 sm:mt-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setThreshold((prev) => (prev <= 0.2 ? 0.35 : 0.15));
+                    }}
+                    className={`px-2.5 py-1 text-xs rounded-md border transition font-medium ${
+                      threshold <= 0.2
+                        ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                        : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
+                    }`}
+                    title="Toggle high sensitivity mode to detect small & distant objects"
+                  >
+                    {threshold <= 0.2 ? "🎯 Small Objects: ON" : "🔍 Small Objects Mode"}
+                  </button>
                   <Settings2 className="w-4 h-4 text-muted-foreground" />
                   <span className="text-xs text-muted-foreground">Threshold:</span>
                   <input type="range" min="0.1" max="0.9" step="0.05" value={threshold} onChange={(e) => setThreshold(parseFloat(e.target.value))} className="w-24 accent-primary" />
@@ -361,6 +404,35 @@ export default function DetectionPage() {
                       <span className="text-sm font-medium text-foreground capitalize">{d.class} #{d.trackId}</span>
                       <span className="text-xs font-mono text-primary">{(d.score * 100).toFixed(1)}%</span>
                     </motion.div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Detailed Everyday Item Classifier (1000+ Categories) */}
+            <div className="hover-card rounded-xl p-4 sm:p-5 border border-primary/20 bg-card/60 backdrop-blur">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-primary uppercase tracking-wider flex items-center gap-1.5">
+                  <span>✨ 1000+ Item Identifier</span>
+                </h3>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono font-medium">ImageNet AI</span>
+              </div>
+              <p className="text-xs text-muted-foreground mb-3 leading-relaxed">
+                Identifies everyday small items (pens, notebooks, watches, tools, keys, devices) in real time.
+              </p>
+              {detailedItems.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic py-1">Hold object in front of camera...</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {detailedItems.map((item, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-secondary/50 text-xs">
+                      <span className="font-medium text-foreground capitalize truncate max-w-[170px]" title={item.className}>
+                        {item.className.split(",")[0]}
+                      </span>
+                      <span className="font-mono text-primary font-semibold">
+                        {(item.probability * 100).toFixed(0)}%
+                      </span>
+                    </div>
                   ))}
                 </div>
               )}
