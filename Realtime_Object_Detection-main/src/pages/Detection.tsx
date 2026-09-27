@@ -1,6 +1,18 @@
 import { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
-import { Video, VideoOff, Camera, Activity, Settings2, Upload, ImageIcon } from "lucide-react";
+import {
+  Video,
+  VideoOff,
+  Camera,
+  Activity,
+  Settings2,
+  Upload,
+  ImageIcon,
+  Crosshair,
+  Volume2,
+  VolumeX,
+  Sparkles,
+} from "lucide-react";
 import { saveDetection } from "@/lib/detectionStore";
 import { getSettings } from "@/lib/settingsStore";
 import { playClickSound } from "@/lib/settingsStore";
@@ -18,6 +30,31 @@ import ObjectSearchBar from "@/components/ObjectSearchBar";
 import VoiceCommandButton from "@/components/VoiceCommandButton";
 import { VoiceCommandResult } from "@/hooks/useVoiceCommands";
 
+let lastSpokenText = "";
+let lastSpokenTime = 0;
+
+function speakObject(text: string) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  const cleanName = text.split(",")[0].trim();
+  const now = Date.now();
+  if (cleanName === lastSpokenText && now - lastSpokenTime < 6000) return;
+  if (now - lastSpokenTime < 3000) return;
+
+  lastSpokenText = cleanName;
+  lastSpokenTime = now;
+
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(`${cleanName} detected`);
+    utterance.rate = 1.05;
+    utterance.pitch = 1.0;
+    utterance.volume = 0.9;
+    window.speechSynthesis.speak(utterance);
+  } catch {
+    // ignore
+  }
+}
+
 export default function DetectionPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -33,6 +70,9 @@ export default function DetectionPage() {
   const [imageDetecting, setImageDetecting] = useState(false);
   const [searchFilter, setSearchFilter] = useState("");
   const [detailedItems, setDetailedItems] = useState<DetailedClassification[]>([]);
+  const [focusedItem, setFocusedItem] = useState<DetailedClassification | null>(null);
+  const [showReticle, setShowReticle] = useState(true);
+  const [voiceAnnounce, setVoiceAnnounce] = useState(false);
   const animFrameRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
   const lastSaveRef = useRef<number>(0);
@@ -40,6 +80,12 @@ export default function DetectionPage() {
   const trackerRef = useRef(new SimpleTracker());
   const searchFilterRef = useRef(searchFilter);
   searchFilterRef.current = searchFilter;
+  const voiceEnabledRef = useRef(voiceAnnounce);
+  voiceEnabledRef.current = voiceAnnounce;
+  const focusedItemRef = useRef(focusedItem);
+  focusedItemRef.current = focusedItem;
+  const showReticleRef = useRef(showReticle);
+  showReticleRef.current = showReticle;
 
   const filteredDetections = useMemo(() => {
     if (!searchFilter.trim()) return detections;
@@ -95,6 +141,7 @@ export default function DetectionPage() {
     if (videoRef.current) videoRef.current.srcObject = null;
     setDetections([]);
     setDetailedItems([]);
+    setFocusedItem(null);
     setFps(0);
     trackerRef.current.reset();
   }, []);
@@ -126,10 +173,17 @@ export default function DetectionPage() {
         setDetections(tracked);
         setObjectCount(tracked.length);
 
-        // Draw
+        // Draw with Reticle & Target Lock
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(video, 0, 0);
-        drawDetections(ctx, tracked, settings.trackingEnabled, searchFilterRef.current);
+        drawDetections(
+          ctx,
+          tracked,
+          settings.trackingEnabled,
+          searchFilterRef.current,
+          focusedItemRef.current,
+          showReticleRef.current
+        );
 
         // FPS
         frameCount++;
@@ -140,14 +194,28 @@ export default function DetectionPage() {
           lastTime = now;
         }
 
-        // Periodically run detailed classification for 1000+ daily items (e.g. pen, watch, notebook)
-        if (now - lastClassifyRef.current > 1200) {
+        // Periodically run high-resolution center classification for ANY small or big item (1000+ classes)
+        if (now - lastClassifyRef.current > 750) {
           lastClassifyRef.current = now;
-          classifyObjects(video, 3).then((res) => {
-            if (res && res.length > 0) {
-              setDetailedItems(res);
-            }
-          });
+          const cropSize = Math.min(260, Math.min(video.videoWidth, video.videoHeight));
+          const cropCanvas = document.createElement("canvas");
+          cropCanvas.width = 224;
+          cropCanvas.height = 224;
+          const cropCtx = cropCanvas.getContext("2d");
+          if (cropCtx) {
+            const sx = (video.videoWidth - cropSize) / 2;
+            const sy = (video.videoHeight - cropSize) / 2;
+            cropCtx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, 224, 224);
+            classifyObjects(cropCanvas, 3).then((res) => {
+              if (res && res.length > 0) {
+                setDetailedItems(res);
+                setFocusedItem(res[0]);
+                if (voiceEnabledRef.current && res[0].probability > 0.35) {
+                  speakObject(res[0].className);
+                }
+              }
+            });
+          }
         }
 
         // Save detections periodically
@@ -346,26 +414,65 @@ export default function DetectionPage() {
                   <span className="hidden sm:inline">Screenshot</span>
                 </button>
 
-                <div className="flex items-center gap-2 w-full sm:w-auto sm:ml-auto mt-2 sm:mt-0">
+                <div className="flex items-center gap-2 w-full sm:w-auto sm:ml-auto mt-2 sm:mt-0 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setShowReticle(!showReticle);
+                    }}
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      showReticle
+                        ? "bg-primary/20 border-primary text-primary"
+                        : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
+                    }`}
+                    title="Toggle Smart Reticle (Aims & locks onto ANY object)"
+                  >
+                    <Crosshair className="w-3.5 h-3.5" />
+                    <span>Reticle: {showReticle ? "ON" : "OFF"}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      const next = !voiceAnnounce;
+                      setVoiceAnnounce(next);
+                      if (next) speakObject("Voice detection active");
+                    }}
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      voiceAnnounce
+                        ? "bg-emerald-500/20 border-emerald-500 text-emerald-400"
+                        : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
+                    }`}
+                    title="Voice announce detected objects using AI speech synthesis"
+                  >
+                    {voiceAnnounce ? <Volume2 className="w-3.5 h-3.5 text-emerald-400" /> : <VolumeX className="w-3.5 h-3.5" />}
+                    <span>Voice: {voiceAnnounce ? "ON" : "OFF"}</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
                       playClickSound();
                       setThreshold((prev) => (prev <= 0.2 ? 0.35 : 0.15));
                     }}
-                    className={`px-2.5 py-1 text-xs rounded-md border transition font-medium ${
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium ${
                       threshold <= 0.2
                         ? "bg-primary text-primary-foreground border-primary shadow-sm"
                         : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
                     }`}
                     title="Toggle high sensitivity mode to detect small & distant objects"
                   >
-                    {threshold <= 0.2 ? "🎯 Small Objects: ON" : "🔍 Small Objects Mode"}
+                    {threshold <= 0.2 ? "🎯 Small Objects: ON" : "🔍 Small Objects"}
                   </button>
-                  <Settings2 className="w-4 h-4 text-muted-foreground" />
-                  <span className="text-xs text-muted-foreground">Threshold:</span>
-                  <input type="range" min="0.1" max="0.9" step="0.05" value={threshold} onChange={(e) => setThreshold(parseFloat(e.target.value))} className="w-24 accent-primary" />
-                  <span className="text-xs font-mono text-primary">{(threshold * 100).toFixed(0)}%</span>
+
+                  <div className="flex items-center gap-1.5 ml-auto sm:ml-0">
+                    <Settings2 className="w-3.5 h-3.5 text-muted-foreground" />
+                    <span className="text-xs text-muted-foreground">Threshold:</span>
+                    <input type="range" min="0.1" max="0.9" step="0.05" value={threshold} onChange={(e) => setThreshold(parseFloat(e.target.value))} className="w-20 accent-primary" />
+                    <span className="text-xs font-mono text-primary font-semibold">{(threshold * 100).toFixed(0)}%</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -388,9 +495,63 @@ export default function DetectionPage() {
               </div>
             </div>
 
+            {/* Smart Reticle Live Target Lock (Universal Detector for Any Item) */}
+            {focusedItem && focusedItem.probability > 0.25 && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="hover-card rounded-xl p-4 border border-emerald-500/40 bg-emerald-500/10 shadow-lg backdrop-blur"
+              >
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                    Target Locked
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono font-bold">
+                    {(focusedItem.probability * 100).toFixed(0)}% Confidence
+                  </span>
+                </div>
+                <p className="text-lg font-bold text-foreground capitalize truncate">
+                  {focusedItem.className.split(",")[0]}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                  {focusedItem.className}
+                </p>
+              </motion.div>
+            )}
+
             <div className="hover-card rounded-xl p-4 sm:p-5">
               <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">Search Objects</h3>
               <ObjectSearchBar value={searchFilter} onChange={setSearchFilter} placeholder="Filter detections..." />
+            </div>
+
+            {/* Detailed Everyday Item Classifier (1000+ Categories) */}
+            <div className="hover-card rounded-xl p-4 sm:p-5 border border-primary/20 bg-card/60 backdrop-blur">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-primary uppercase tracking-wider flex items-center gap-1.5">
+                  <span>✨ 1000+ Universal Classifier</span>
+                </h3>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono font-medium">ImageNet Deep CNN</span>
+              </div>
+              <p className="text-xs text-muted-foreground mb-3 leading-relaxed">
+                Aim reticle at any object (pen, watch, notebook, keys, glasses, tools) in front of the lens.
+              </p>
+              {detailedItems.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic py-1">Aim camera at an object to inspect details...</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {detailedItems.map((item, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-secondary/50 text-xs">
+                      <span className="font-medium text-foreground capitalize truncate max-w-[170px]" title={item.className}>
+                        {item.className.split(",")[0]}
+                      </span>
+                      <span className="font-mono text-primary font-semibold">
+                        {(item.probability * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="hover-card rounded-xl p-4 sm:p-5">
@@ -408,35 +569,6 @@ export default function DetectionPage() {
                 </div>
               )}
             </div>
-
-            {/* Detailed Everyday Item Classifier (1000+ Categories) */}
-            <div className="hover-card rounded-xl p-4 sm:p-5 border border-primary/20 bg-card/60 backdrop-blur">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-xs font-semibold text-primary uppercase tracking-wider flex items-center gap-1.5">
-                  <span>✨ 1000+ Item Identifier</span>
-                </h3>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono font-medium">ImageNet AI</span>
-              </div>
-              <p className="text-xs text-muted-foreground mb-3 leading-relaxed">
-                Identifies everyday small items (pens, notebooks, watches, tools, keys, devices) in real time.
-              </p>
-              {detailedItems.length === 0 ? (
-                <p className="text-xs text-muted-foreground italic py-1">Hold object in front of camera...</p>
-              ) : (
-                <div className="space-y-1.5">
-                  {detailedItems.map((item, idx) => (
-                    <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-secondary/50 text-xs">
-                      <span className="font-medium text-foreground capitalize truncate max-w-[170px]" title={item.className}>
-                        {item.className.split(",")[0]}
-                      </span>
-                      <span className="font-mono text-primary font-semibold">
-                        {(item.probability * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
         </div>
 
@@ -446,25 +578,94 @@ export default function DetectionPage() {
   );
 }
 
-function drawDetections(ctx: CanvasRenderingContext2D, detections: TrackedDetection[], showTrackId: boolean, highlightFilter = "") {
+function drawDetections(
+  ctx: CanvasRenderingContext2D,
+  detections: TrackedDetection[],
+  showTrackId: boolean,
+  highlightFilter = "",
+  focusedItem: DetailedClassification | null = null,
+  showReticle = true
+) {
+  // 1. Draw bounding boxes
   detections.forEach((d) => {
     const [x, y, w, h] = d.bbox;
     const isHighlighted = highlightFilter && d.class.toLowerCase().includes(highlightFilter.toLowerCase());
-    const color = isHighlighted ? "hsl(45, 100%, 50%)" : "hsl(200, 100%, 50%)";
-    const bgColor = isHighlighted ? "hsla(45, 100%, 50%, 0.9)" : "hsla(200, 100%, 50%, 0.85)";
+    const color = isHighlighted ? "hsl(45, 100%, 50%)" : "hsl(187, 100%, 45%)";
+    const bgColor = isHighlighted ? "hsla(45, 100%, 50%, 0.9)" : "hsla(187, 100%, 45%, 0.85)";
 
     ctx.strokeStyle = color;
     ctx.lineWidth = isHighlighted ? 3 : 2;
     ctx.strokeRect(x, y, w, h);
 
+    // Corner accents
+    const corner = Math.min(10, w / 4, h / 4);
+    ctx.strokeStyle = isHighlighted ? "#ffffff" : "#38bdf8";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x, y + corner); ctx.lineTo(x, y); ctx.lineTo(x + corner, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + w - corner, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + corner); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, y + h - corner); ctx.lineTo(x, y + h); ctx.lineTo(x + corner, y + h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + w - corner, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - corner); ctx.stroke();
+
     const label = showTrackId
       ? `${d.class} #${d.trackId} ${(d.score * 100).toFixed(0)}%`
       : `${d.class} ${(d.score * 100).toFixed(0)}%`;
-    ctx.font = isHighlighted ? "bold 14px Inter, sans-serif" : "14px Inter, sans-serif";
+    ctx.font = isHighlighted ? "bold 13px Inter, sans-serif" : "12px Inter, sans-serif";
     const textW = ctx.measureText(label).width;
     ctx.fillStyle = bgColor;
     ctx.fillRect(x, y - 22, textW + 12, 22);
     ctx.fillStyle = "#ffffff";
     ctx.fillText(label, x + 6, y - 6);
   });
+
+  // 2. Futuristic Smart Reticle (Universal Item Scanner for Any Object in the world)
+  if (showReticle) {
+    const size = Math.min(220, Math.min(ctx.canvas.width, ctx.canvas.height) * 0.45);
+    const cx = ctx.canvas.width / 2;
+    const cy = ctx.canvas.height / 2;
+    const rx = cx - size / 2;
+    const ry = cy - size / 2;
+    const bracket = 24;
+
+    const hasTarget = focusedItem && focusedItem.probability > 0.25;
+    const reticleColor = hasTarget ? "rgba(34, 197, 94, 0.9)" : "rgba(56, 189, 248, 0.65)";
+
+    ctx.save();
+    ctx.strokeStyle = reticleColor;
+    ctx.lineWidth = 2.5;
+
+    // Corner brackets
+    ctx.beginPath(); ctx.moveTo(rx, ry + bracket); ctx.lineTo(rx, ry); ctx.lineTo(rx + bracket, ry); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(rx + size - bracket, ry); ctx.lineTo(rx + size, ry); ctx.lineTo(rx + size, ry + bracket); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(rx, ry + size - bracket); ctx.lineTo(rx, ry + size); ctx.lineTo(rx + bracket, ry + size); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(rx + size - bracket, ry + size); ctx.lineTo(rx + size, ry + size); ctx.lineTo(rx + size, ry + size - bracket); ctx.stroke();
+
+    // Center crosshair
+    ctx.strokeStyle = hasTarget ? "rgba(34, 197, 94, 0.7)" : "rgba(56, 189, 248, 0.4)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(cx - 8, cy); ctx.lineTo(cx + 8, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8); ctx.stroke();
+
+    // Reticle Label
+    if (hasTarget) {
+      const topName = focusedItem.className.split(",")[0];
+      const targetText = `🎯 TARGET: ${topName.toUpperCase()} (${(focusedItem.probability * 100).toFixed(0)}%)`;
+      ctx.font = "bold 13px Inter, sans-serif";
+      const w = ctx.measureText(targetText).width;
+      ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+      ctx.fillRect(cx - w / 2 - 8, ry - 28, w + 16, 24);
+      ctx.strokeStyle = "rgba(34, 197, 94, 0.9)";
+      ctx.strokeRect(cx - w / 2 - 8, ry - 28, w + 16, 24);
+      ctx.fillStyle = "#22c55e";
+      ctx.fillText(targetText, cx - w / 2, ry - 11);
+    } else {
+      ctx.font = "11px Inter, sans-serif";
+      const hint = "AIM AT ANY OBJECT (PEN, WATCH, KEYS, ETC.)";
+      const w = ctx.measureText(hint).width;
+      ctx.fillStyle = "rgba(15, 23, 42, 0.65)";
+      ctx.fillRect(cx - w / 2 - 6, ry - 22, w + 12, 18);
+      ctx.fillStyle = "rgba(148, 163, 184, 0.9)";
+      ctx.fillText(hint, cx - w / 2, ry - 8);
+    }
+    ctx.restore();
+  }
 }

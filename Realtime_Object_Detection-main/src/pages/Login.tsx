@@ -11,7 +11,7 @@ import PageTransition from "@/components/PageTransition";
 import NeuralBackground from "@/components/NeuralBackground";
 
 export default function LoginPage() {
-  const { signIn } = useAuth();
+  const { signIn, loginAsGuest } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -32,8 +32,17 @@ export default function LoginPage() {
       toast.error(error);
     } else {
       toast.success("Welcome back!");
-      navigate("/dashboard");
+      navigate("/detection");
     }
+  };
+
+  const handleGuestLogin = async () => {
+    playClickSound();
+    setLoading(true);
+    await loginAsGuest();
+    setLoading(false);
+    toast.success("Welcome! Signed in as Project Reviewer / Guest.");
+    navigate("/detection");
   };
 
   return (
@@ -107,6 +116,25 @@ export default function LoginPage() {
                     Signing in...
                   </span>
                 ) : "Sign In"}
+              </Button>
+
+              <div className="relative my-2">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t border-border/50" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-card px-2 text-muted-foreground">Or</span>
+                </div>
+              </div>
+
+              <Button
+                type="button"
+                onClick={handleGuestLogin}
+                disabled={loading}
+                variant="outline"
+                className="w-full border-primary/40 hover:bg-primary/10 text-primary font-semibold h-11 shadow-sm flex items-center justify-center gap-2"
+              >
+                <span>⚡ 1-Click Instant Demo Login</span>
               </Button>
             </form>
 

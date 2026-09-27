@@ -11,7 +11,7 @@ import PageTransition from "@/components/PageTransition";
 import NeuralBackground from "@/components/NeuralBackground";
 
 export default function SignupPage() {
-  const { signUp } = useAuth();
+  const { signUp, loginAsGuest } = useAuth();
   const navigate = useNavigate();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
@@ -44,9 +44,18 @@ export default function SignupPage() {
     if (error) {
       toast.error(error);
     } else {
-      toast.success("Account created! Check your email to verify.");
-      navigate("/login");
+      toast.success(`Welcome to Detectra AI, ${fullName}! Direct access granted.`);
+      navigate("/detection");
     }
+  };
+
+  const handleGuestLogin = async () => {
+    playClickSound();
+    setLoading(true);
+    await loginAsGuest();
+    setLoading(false);
+    toast.success("Logged in as Project Reviewer / Guest!");
+    navigate("/detection");
   };
 
   return (
@@ -108,6 +117,25 @@ export default function SignupPage() {
                     Creating account...
                   </span>
                 ) : "Sign Up"}
+              </Button>
+
+              <div className="relative my-2">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t border-border/50" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-card px-2 text-muted-foreground">Or</span>
+                </div>
+              </div>
+
+              <Button
+                type="button"
+                onClick={handleGuestLogin}
+                disabled={loading}
+                variant="outline"
+                className="w-full border-primary/40 hover:bg-primary/10 text-primary font-semibold h-11 shadow-sm flex items-center justify-center gap-2"
+              >
+                <span>⚡ Instant Demo Access (No Email Required)</span>
               </Button>
             </form>
 
