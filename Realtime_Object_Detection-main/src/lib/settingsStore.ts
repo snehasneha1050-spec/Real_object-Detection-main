@@ -15,7 +15,7 @@ export interface AppSettings {
 }
 
 const defaults: AppSettings = {
-  confidenceThreshold: 0.25,
+  confidenceThreshold: 0.20,
   trackingEnabled: true,
   countingEnabled: true,
   darkMode: true,

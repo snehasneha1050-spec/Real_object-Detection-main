@@ -61,15 +61,15 @@ export class TensorFlowDetector {
    */
   async detect(
     input: HTMLImageElement | HTMLVideoElement | ImageData,
-    threshold: number = 0.25
+    threshold: number = 0.20
   ): Promise<Detection[]> {
     if (!this.model) {
       throw new Error("Model not loaded. Call initialize() first.");
     }
 
     try {
-      // Allow detection of up to 100 objects down to threshold or 0.12 min score
-      const minInternalScore = Math.min(Math.max(threshold, 0.05), 0.15);
+      // Allow detection of up to 100 objects down to threshold or 0.10 min score
+      const minInternalScore = Math.min(Math.max(threshold, 0.05), 0.10);
       const predictions = await this.model.detect(input, 100, minInternalScore);
       return predictions
         .filter(prediction => prediction.score >= threshold)
@@ -127,7 +127,7 @@ export const isTensorFlowReady = () => detector.isReady();
 
 export const detectObjects = (
   input: HTMLImageElement | HTMLVideoElement | ImageData,
-  threshold: number = 0.25
+  threshold: number = 0.20
 ) => detector.detect(input, threshold);
 
 export const classifyObjects = (

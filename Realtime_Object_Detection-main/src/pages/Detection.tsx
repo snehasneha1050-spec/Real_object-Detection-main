@@ -12,6 +12,8 @@ import {
   Volume2,
   VolumeX,
   Sparkles,
+  Pin,
+  Trash2,
 } from "lucide-react";
 import { saveDetection } from "@/lib/detectionStore";
 import { getSettings } from "@/lib/settingsStore";
@@ -35,7 +37,7 @@ let lastSpokenTime = 0;
 
 function speakObject(text: string) {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-  const cleanName = text.split(",")[0].trim();
+  const cleanName = cleanClassName(text);
   const now = Date.now();
   if (cleanName === lastSpokenText && now - lastSpokenTime < 6000) return;
   if (now - lastSpokenTime < 3000) return;
@@ -53,6 +55,78 @@ function speakObject(text: string) {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Normalizes ImageNet & COCO classes into clean, professional titles
+ * Handles pens, pencils, notebooks, watches, coins, keys, glasses, etc.
+ */
+function cleanClassName(raw: string): string {
+  if (!raw) return "Object";
+  const lower = raw.toLowerCase().trim();
+
+  // High-frequency real-world objects
+  if (lower.includes("ballpoint") || lower.includes("ballpen") || lower.includes("biro")) return "Ballpoint Pen";
+  if (lower.includes("fountain pen")) return "Fountain Pen";
+  if (lower.includes("pencil sharpener")) return "Pencil Sharpener";
+  if (lower.includes("pencil box") || lower.includes("pencil case")) return "Pencil Case";
+  if (lower.includes("eraser")) return "Eraser";
+  if (lower.includes("notebook computer")) return "Laptop";
+  if (lower.includes("notebook") || lower.includes("spiral notebook")) return "Notebook";
+  if (lower.includes("digital watch")) return "Digital Watch";
+  if (lower.includes("analog clock")) return "Analog Watch/Clock";
+  if (lower.includes("wall clock")) return "Wall Clock";
+  if (lower.includes("stopwatch")) return "Stopwatch";
+  if (lower.includes("cellular") || lower.includes("cellphone") || lower.includes("mobile phone")) return "Smartphone";
+  if (lower.includes("sunglass") || lower.includes("shades")) return "Sunglasses";
+  if (lower.includes("spectacles") || lower.includes("eyeglass")) return "Eyeglasses";
+  if (lower.includes("coffee mug")) return "Coffee Mug";
+  if (lower.includes("water bottle")) return "Water Bottle";
+  if (lower.includes("pill bottle")) return "Medicine Bottle";
+  if (lower.includes("wallet") || lower.includes("billfold")) return "Wallet";
+  if (lower.includes("padlock") || lower.includes("combination lock")) return "Padlock / Keys";
+  if (lower.includes("headphone") || lower.includes("headset") || lower.includes("earphone")) return "Headphones";
+  if (lower.includes("computer mouse")) return "Computer Mouse";
+  if (lower.includes("keyboard") || lower.includes("keypad")) return "Keyboard";
+  if (lower.includes("ruler") || lower.includes("tape measure")) return "Ruler";
+  if (lower.includes("lighter")) return "Lighter";
+  if (lower.includes("screwdriver")) return "Screwdriver";
+  if (lower.includes("scissors")) return "Scissors";
+  if (lower.includes("binder")) return "Binder / Notebook";
+  if (lower.includes("paper towel") || lower.includes("tissue")) return "Tissue / Paper";
+  if (lower.includes("cup") || lower.includes("teacup")) return "Cup";
+
+  // General clean-up: take the first synonym and title-case
+  const first = raw.split(",")[0].trim();
+  return first
+    .split(/[\s_-]+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+/**
+ * Calculates Intersection over Union between two bounding boxes [x, y, w, h]
+ */
+function computeIoU(a: [number, number, number, number], b: [number, number, number, number]): number {
+  const [ax, ay, aw, ah] = a;
+  const [bx, by, bw, bh] = b;
+  const x1 = Math.max(ax, bx);
+  const y1 = Math.max(ay, by);
+  const x2 = Math.min(ax + aw, bx + bw);
+  const y2 = Math.min(ay + ah, by + bh);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const areaA = aw * ah;
+  const areaB = bw * bh;
+  return inter / (areaA + areaB - inter + 1e-6);
+}
+
+interface ScannedTarget {
+  id: string;
+  class: string;
+  score: number;
+  bbox: [number, number, number, number];
+  timestamp: number;
+  isPinned?: boolean;
 }
 
 export default function DetectionPage() {
@@ -73,11 +147,15 @@ export default function DetectionPage() {
   const [focusedItem, setFocusedItem] = useState<DetailedClassification | null>(null);
   const [showReticle, setShowReticle] = useState(true);
   const [voiceAnnounce, setVoiceAnnounce] = useState(false);
+  const [pinnedTargets, setPinnedTargets] = useState<ScannedTarget[]>([]);
+  const [tapNotice, setTapNotice] = useState<string | null>(null);
+
   const animFrameRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
   const lastSaveRef = useRef<number>(0);
   const lastClassifyRef = useRef<number>(0);
   const trackerRef = useRef(new SimpleTracker());
+
   const searchFilterRef = useRef(searchFilter);
   searchFilterRef.current = searchFilter;
   const voiceEnabledRef = useRef(voiceAnnounce);
@@ -86,13 +164,16 @@ export default function DetectionPage() {
   focusedItemRef.current = focusedItem;
   const showReticleRef = useRef(showReticle);
   showReticleRef.current = showReticle;
+  const pinnedTargetsRef = useRef(pinnedTargets);
+  pinnedTargetsRef.current = pinnedTargets;
+  const activeReticleTargetRef = useRef<ScannedTarget | null>(null);
 
   const filteredDetections = useMemo(() => {
     if (!searchFilter.trim()) return detections;
-    return detections.filter(d => d.class.toLowerCase().includes(searchFilter.toLowerCase()));
+    return detections.filter((d) => d.class.toLowerCase().includes(searchFilter.toLowerCase()));
   }, [detections, searchFilter]);
 
-  // Load TensorFlow.js model
+  // Load TensorFlow.js models
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -105,7 +186,9 @@ export default function DetectionPage() {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const startCamera = useCallback(async () => {
@@ -142,11 +225,13 @@ export default function DetectionPage() {
     setDetections([]);
     setDetailedItems([]);
     setFocusedItem(null);
+    setPinnedTargets([]);
+    activeReticleTargetRef.current = null;
     setFps(0);
     trackerRef.current.reset();
   }, []);
 
-  // Detection loop
+  // Real-time Detection Loop
   useEffect(() => {
     if (!running || !isTensorFlowReady() || !videoRef.current || !canvasRef.current) return;
 
@@ -164,16 +249,59 @@ export default function DetectionPage() {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
 
-        const predictions = await detectObjects(video, threshold);
+        // 1. Run COCO-SSD detection
+        const cocoPredictions = await detectObjects(video, threshold);
+        const allPredictions: Detection[] = [...cocoPredictions];
 
+        // 2. Merge Universal Reticle Target if active & fresh (<1200ms)
+        const reticleTarget = activeReticleTargetRef.current;
+        if (showReticleRef.current && reticleTarget && Date.now() - reticleTarget.timestamp < 1200 && reticleTarget.score >= 0.16) {
+          const overlapIdx = allPredictions.findIndex((p) => computeIoU(p.bbox, reticleTarget.bbox) > 0.35);
+          if (overlapIdx >= 0) {
+            // Refine generic COCO classes with specific MobileNet label (e.g. book -> notebook, clock -> watch)
+            const genericClasses = ["book", "cell phone", "bottle", "cup", "clock", "remote", "vase", "bowl"];
+            if (genericClasses.includes(allPredictions[overlapIdx].class.toLowerCase())) {
+              allPredictions[overlapIdx] = {
+                ...allPredictions[overlapIdx],
+                class: reticleTarget.class,
+                score: Math.max(allPredictions[overlapIdx].score, reticleTarget.score),
+              };
+            }
+          } else {
+            // COCO missed this object (e.g. pen, watch, keys, coin, glasses, headphones, scissors)
+            // Add universal detection box!
+            allPredictions.push({
+              class: reticleTarget.class,
+              score: reticleTarget.score,
+              bbox: reticleTarget.bbox,
+            });
+          }
+        }
+
+        // 3. Merge user pinned targets (active for 15s)
+        const nowMs = Date.now();
+        pinnedTargetsRef.current.forEach((pt) => {
+          if (nowMs - pt.timestamp < 15000) {
+            const exists = allPredictions.some((p) => computeIoU(p.bbox, pt.bbox) > 0.4);
+            if (!exists) {
+              allPredictions.push({
+                class: pt.class,
+                score: pt.score,
+                bbox: pt.bbox,
+              });
+            }
+          }
+        });
+
+        // 4. Update multi-object tracker
         const tracked = settings.trackingEnabled
-          ? trackerRef.current.update(predictions)
-          : predictions.map((d, i) => ({ ...d, trackId: i + 1 }));
+          ? trackerRef.current.update(allPredictions)
+          : allPredictions.map((d, i) => ({ ...d, trackId: i + 1 }));
 
         setDetections(tracked);
         setObjectCount(tracked.length);
 
-        // Draw with Reticle & Target Lock
+        // 5. Draw video + bounding boxes + smart reticle
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(video, 0, 0);
         drawDetections(
@@ -185,7 +313,7 @@ export default function DetectionPage() {
           showReticleRef.current
         );
 
-        // FPS
+        // 6. FPS Calculation
         frameCount++;
         const now = performance.now();
         if (now - lastTime >= 1000) {
@@ -194,10 +322,10 @@ export default function DetectionPage() {
           lastTime = now;
         }
 
-        // Periodically run high-resolution center classification for ANY small or big item (1000+ classes)
-        if (now - lastClassifyRef.current > 750) {
+        // 7. Universal 1000+ Class Classifier for ANY small or large object (every 400ms)
+        if (now - lastClassifyRef.current > 400) {
           lastClassifyRef.current = now;
-          const cropSize = Math.min(260, Math.min(video.videoWidth, video.videoHeight));
+          const cropSize = Math.min(240, Math.min(video.videoWidth, video.videoHeight) * 0.48);
           const cropCanvas = document.createElement("canvas");
           cropCanvas.width = 224;
           cropCanvas.height = 224;
@@ -210,15 +338,27 @@ export default function DetectionPage() {
               if (res && res.length > 0) {
                 setDetailedItems(res);
                 setFocusedItem(res[0]);
-                if (voiceEnabledRef.current && res[0].probability > 0.35) {
-                  speakObject(res[0].className);
+                if (res[0].probability >= 0.16) {
+                  const formatted = cleanClassName(res[0].className);
+                  activeReticleTargetRef.current = {
+                    id: "reticle-center",
+                    class: formatted,
+                    score: res[0].probability,
+                    bbox: [sx, sy, cropSize, cropSize],
+                    timestamp: Date.now(),
+                  };
+                  if (voiceEnabledRef.current && res[0].probability > 0.28) {
+                    speakObject(formatted);
+                  }
+                } else {
+                  activeReticleTargetRef.current = null;
                 }
               }
             });
           }
         }
 
-        // Save detections periodically
+        // 8. Save detections periodically to history
         if (tracked.length > 0 && now - lastSaveRef.current > 3000) {
           lastSaveRef.current = now;
           tracked.forEach((d) => {
@@ -239,6 +379,55 @@ export default function DetectionPage() {
     return () => cancelAnimationFrame(animFrameRef.current);
   }, [running, threshold]);
 
+  // Interactive Tap/Click-to-Scan on Canvas (Pinpoints ANY object on screen)
+  const handleCanvasClick = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !isTensorFlowReady()) return;
+    playClickSound();
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const clickX = (e.clientX - rect.left) * scaleX;
+    const clickY = (e.clientY - rect.top) * scaleY;
+
+    const cropSize = Math.min(220, Math.min(canvas.width, canvas.height) * 0.45);
+    const sx = Math.max(0, Math.min(canvas.width - cropSize, clickX - cropSize / 2));
+    const sy = Math.max(0, Math.min(canvas.height - cropSize, clickY - cropSize / 2));
+
+    const cropCanvas = document.createElement("canvas");
+    cropCanvas.width = 224;
+    cropCanvas.height = 224;
+    const cropCtx = cropCanvas.getContext("2d");
+    if (!cropCtx) return;
+
+    // Use current video or image as source
+    const source = (mode === "image" && canvas) ? canvas : (videoRef.current || canvas);
+    cropCtx.drawImage(source, sx, sy, cropSize, cropSize, 0, 0, 224, 224);
+
+    const res = await classifyObjects(cropCanvas, 3);
+    if (res && res.length > 0 && res[0].probability >= 0.14) {
+      const top = res[0];
+      const name = cleanClassName(top.className);
+      const newTarget: ScannedTarget = {
+        id: `pin-${Date.now()}`,
+        class: name,
+        score: top.probability,
+        bbox: [sx, sy, cropSize, cropSize],
+        timestamp: Date.now(),
+        isPinned: true,
+      };
+      setPinnedTargets((prev) => [newTarget, ...prev.filter((p) => computeIoU(p.bbox, newTarget.bbox) < 0.5)].slice(0, 5));
+      setFocusedItem(top);
+      setDetailedItems(res);
+      setTapNotice(`🎯 Pinned: ${name} (${(top.probability * 100).toFixed(0)}%)`);
+      setTimeout(() => setTapNotice(null), 3000);
+      if (voiceEnabledRef.current) {
+        speakObject(name);
+      }
+    }
+  };
+
   // Image upload handler
   const handleImageUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     playClickSound();
@@ -249,11 +438,11 @@ export default function DetectionPage() {
     setMode("image");
     setDetections([]);
     setObjectCount(0);
+    setPinnedTargets([]);
 
     const url = URL.createObjectURL(file);
     setUploadedImage(url);
 
-    // Draw image preview without detection
     const img = new Image();
     img.onload = () => {
       const canvas = canvasRef.current;
@@ -266,6 +455,7 @@ export default function DetectionPage() {
     img.src = url;
   }, [stopCamera]);
 
+  // Detect from Image with Multi-Zone Scan
   const detectFromImage = useCallback(async () => {
     if (!isTensorFlowReady() || !canvasRef.current || !uploadedImage) return;
     playClickSound();
@@ -279,18 +469,57 @@ export default function DetectionPage() {
       const ctx = canvas.getContext("2d")!;
       ctx.drawImage(img, 0, 0);
 
-      const predictions = await detectObjects(img, threshold);
+      // 1. Full COCO-SSD Detection
+      const cocoPredictions = await detectObjects(img, threshold);
+      const allPredictions: Detection[] = [...cocoPredictions];
 
-      const tracked = predictions.map((d, i) => ({ ...d, trackId: i + 1 }));
+      // 2. Multi-Zone Universal MobileNet Scan (Center + 4 Quadrants)
+      const zones = [
+        { x: img.width * 0.25, y: img.height * 0.25, w: img.width * 0.5, h: img.height * 0.5 },
+        { x: 0, y: 0, w: img.width * 0.5, h: img.height * 0.5 },
+        { x: img.width * 0.5, y: 0, w: img.width * 0.5, h: img.height * 0.5 },
+        { x: 0, y: img.height * 0.5, w: img.width * 0.5, h: img.height * 0.5 },
+        { x: img.width * 0.5, y: img.height * 0.5, w: img.width * 0.5, h: img.height * 0.5 },
+      ];
+
+      for (const zone of zones) {
+        const zCanvas = document.createElement("canvas");
+        zCanvas.width = 224;
+        zCanvas.height = 224;
+        const zCtx = zCanvas.getContext("2d");
+        if (zCtx) {
+          zCtx.drawImage(img, zone.x, zone.y, zone.w, zone.h, 0, 0, 224, 224);
+          const zRes = await classifyObjects(zCanvas, 2);
+          if (zRes && zRes.length > 0 && zRes[0].probability >= 0.18) {
+            const top = zRes[0];
+            const name = cleanClassName(top.className);
+            const zoneBbox: [number, number, number, number] = [zone.x, zone.y, zone.w, zone.h];
+            const exists = allPredictions.some((p) => computeIoU(p.bbox, zoneBbox) > 0.35);
+            if (!exists) {
+              allPredictions.push({
+                class: name,
+                score: top.probability,
+                bbox: zoneBbox,
+              });
+            }
+          }
+        }
+      }
+
+      const tracked = allPredictions.map((d, i) => ({ ...d, trackId: i + 1 }));
       setDetections(tracked);
       setObjectCount(tracked.length);
 
-      drawDetections(ctx, tracked, false, searchFilterRef.current);
+      drawDetections(ctx, tracked, false, searchFilterRef.current, null, false);
 
-      // Classify everyday items from image
+      // Classify full image
       classifyObjects(img, 3).then((res) => {
         if (res && res.length > 0) {
           setDetailedItems(res);
+          setFocusedItem(res[0]);
+          if (voiceEnabledRef.current && res[0].probability > 0.28) {
+            speakObject(cleanClassName(res[0].className));
+          }
         }
       });
 
@@ -337,7 +566,9 @@ export default function DetectionPage() {
           <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold mb-2">
             Live <span className="text-primary">Detection</span>
           </h1>
-          <p className="text-sm sm:text-base text-muted-foreground mb-6 sm:mb-8">Real-time object detection and tracking using AI.</p>
+          <p className="text-sm sm:text-base text-muted-foreground mb-6 sm:mb-8">
+            Universal Real-Time Object Recognition with Deep Neural Networks — Detects both common and everyday objects (pens, watches, notebooks, keys, phones, etc.)
+          </p>
         </motion.div>
 
         <div className="grid lg:grid-cols-3 gap-4 sm:gap-6">
@@ -346,13 +577,18 @@ export default function DetectionPage() {
             <div className="hover-card rounded-xl overflow-hidden">
               <div className="relative aspect-video bg-muted flex items-center justify-center">
                 <video ref={videoRef} className="hidden" muted playsInline />
-                <canvas ref={canvasRef} className={`absolute inset-0 w-full h-full object-contain ${showCanvas ? "" : "hidden"}`} />
+                <canvas
+                  ref={canvasRef}
+                  onClick={handleCanvasClick}
+                  title="Click anywhere to scan and lock any object"
+                  className={`absolute inset-0 w-full h-full object-contain cursor-crosshair ${showCanvas ? "" : "hidden"}`}
+                />
                 {!showCanvas && (
                   <div className="text-center text-muted-foreground p-4">
                     {loading ? (
                       <div className="flex flex-col items-center gap-3">
                         <div className="w-10 h-10 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                        <p className="text-sm">Loading AI model...</p>
+                        <p className="text-sm">Loading AI models (COCO-SSD + MobileNet 1000+)...</p>
                       </div>
                     ) : (
                       <div className="flex flex-col items-center gap-3">
@@ -373,46 +609,99 @@ export default function DetectionPage() {
                   <div className="absolute inset-0 bg-background/60 backdrop-blur-sm flex items-center justify-center">
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-10 h-10 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                      <p className="text-sm text-foreground font-medium">Detecting objects...</p>
+                      <p className="text-sm text-foreground font-medium">Scanning all objects in image...</p>
                     </div>
                   </div>
                 )}
               </div>
 
+              {/* Interactive Universal Mode Banner */}
+              {showCanvas && (
+                <div className="bg-secondary/40 border-t border-border px-3 py-2 text-xs flex items-center justify-between text-muted-foreground flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-3.5 h-3.5 text-primary animate-pulse" />
+                    <span>
+                      <strong className="text-foreground">Universal Scanner Active:</strong> Aim reticle or{" "}
+                      <span className="text-primary font-medium underline underline-offset-2">tap anywhere on video</span> to lock ANY object (pens, watches, notebooks, keys, coins, etc.)
+                    </span>
+                  </div>
+                  {tapNotice && (
+                    <span className="text-emerald-400 font-semibold animate-pulse">{tapNotice}</span>
+                  )}
+                </div>
+              )}
+
               {/* Controls */}
               <div className="p-3 sm:p-4 flex flex-wrap items-center gap-2 sm:gap-3 border-t border-border">
                 {!running ? (
-                  <button onClick={startCamera} disabled={loading || !isTensorFlowReady()} className="btn-glow inline-flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-lg gradient-cyan text-primary-foreground font-medium text-sm disabled:opacity-50 transition shadow-md">
+                  <button
+                    onClick={startCamera}
+                    disabled={loading || !isTensorFlowReady()}
+                    className="btn-glow inline-flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-lg gradient-cyan text-primary-foreground font-medium text-sm disabled:opacity-50 transition shadow-md"
+                  >
                     <Video className="w-4 h-4" />
                     <span className="hidden sm:inline">Start Detection</span>
                     <span className="sm:hidden">Start</span>
                   </button>
                 ) : (
-                  <button onClick={stopCamera} className="btn-glow inline-flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-lg bg-destructive text-destructive-foreground font-medium text-sm transition">
+                  <button
+                    onClick={stopCamera}
+                    className="btn-glow inline-flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-lg bg-destructive text-destructive-foreground font-medium text-sm transition"
+                  >
                     <VideoOff className="w-4 h-4" />
                     Stop
                   </button>
                 )}
 
                 <input type="file" ref={fileInputRef} accept="image/*" className="hidden" onChange={handleImageUpload} />
-                <button onClick={() => { fileInputRef.current?.click(); playClickSound(); }} disabled={loading || !isTensorFlowReady()} className="btn-glow inline-flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg border border-border bg-card text-foreground font-medium text-sm disabled:opacity-40 hover:bg-secondary transition">
+                <button
+                  onClick={() => {
+                    fileInputRef.current?.click();
+                    playClickSound();
+                  }}
+                  disabled={loading || !isTensorFlowReady()}
+                  className="btn-glow inline-flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg border border-border bg-card text-foreground font-medium text-sm disabled:opacity-40 hover:bg-secondary transition"
+                >
                   <Upload className="w-4 h-4" />
                   <span className="hidden sm:inline">Upload Image</span>
                   <span className="sm:hidden">Upload</span>
                 </button>
 
                 {mode === "image" && uploadedImage && (
-                  <button onClick={detectFromImage} disabled={imageDetecting || !isTensorFlowReady()} className="btn-glow inline-flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg gradient-cyan text-primary-foreground font-medium text-sm disabled:opacity-50 transition shadow-md">
+                  <button
+                    onClick={detectFromImage}
+                    disabled={imageDetecting || !isTensorFlowReady()}
+                    className="btn-glow inline-flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg gradient-cyan text-primary-foreground font-medium text-sm disabled:opacity-50 transition shadow-md"
+                  >
                     <ImageIcon className="w-4 h-4" />
                     <span className="hidden sm:inline">Detect Objects</span>
                     <span className="sm:hidden">Detect</span>
                   </button>
                 )}
 
-                <button onClick={captureScreenshot} disabled={!showCanvas} className="btn-glow inline-flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg border border-border bg-card text-foreground font-medium text-sm disabled:opacity-40 hover:bg-secondary transition">
+                <button
+                  onClick={captureScreenshot}
+                  disabled={!showCanvas}
+                  className="btn-glow inline-flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg border border-border bg-card text-foreground font-medium text-sm disabled:opacity-40 hover:bg-secondary transition"
+                >
                   <Camera className="w-4 h-4" />
                   <span className="hidden sm:inline">Screenshot</span>
                 </button>
+
+                {pinnedTargets.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setPinnedTargets([]);
+                    }}
+                    className="px-2.5 py-1.5 text-xs rounded-lg border border-amber-500/40 bg-amber-500/20 text-amber-300 font-medium hover:bg-amber-500/30 transition inline-flex items-center gap-1.5"
+                    title="Clear pinned object targets"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Clear Pins ({pinnedTargets.length})</span>
+                  </button>
+                )}
 
                 <div className="flex items-center gap-2 w-full sm:w-auto sm:ml-auto mt-2 sm:mt-0 flex-wrap">
                   <button
@@ -426,7 +715,7 @@ export default function DetectionPage() {
                         ? "bg-primary/20 border-primary text-primary"
                         : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
                     }`}
-                    title="Toggle Smart Reticle (Aims & locks onto ANY object)"
+                    title="Toggle Smart Reticle (Aims & locks onto ANY object in the room)"
                   >
                     <Crosshair className="w-3.5 h-3.5" />
                     <span>Reticle: {showReticle ? "ON" : "OFF"}</span>
@@ -455,22 +744,30 @@ export default function DetectionPage() {
                     type="button"
                     onClick={() => {
                       playClickSound();
-                      setThreshold((prev) => (prev <= 0.2 ? 0.35 : 0.15));
+                      setThreshold((prev) => (prev <= 0.18 ? 0.30 : 0.15));
                     }}
                     className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium ${
-                      threshold <= 0.2
+                      threshold <= 0.18
                         ? "bg-primary text-primary-foreground border-primary shadow-sm"
                         : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
                     }`}
                     title="Toggle high sensitivity mode to detect small & distant objects"
                   >
-                    {threshold <= 0.2 ? "🎯 Small Objects: ON" : "🔍 Small Objects"}
+                    {threshold <= 0.18 ? "🎯 Small Objects: ON" : "🔍 Small Objects"}
                   </button>
 
                   <div className="flex items-center gap-1.5 ml-auto sm:ml-0">
                     <Settings2 className="w-3.5 h-3.5 text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">Threshold:</span>
-                    <input type="range" min="0.1" max="0.9" step="0.05" value={threshold} onChange={(e) => setThreshold(parseFloat(e.target.value))} className="w-20 accent-primary" />
+                    <span className="text-xs text-muted-foreground">Sensitivity:</span>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="0.8"
+                      step="0.05"
+                      value={threshold}
+                      onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                      className="w-20 accent-primary"
+                    />
                     <span className="text-xs font-mono text-primary font-semibold">{(threshold * 100).toFixed(0)}%</span>
                   </div>
                 </div>
@@ -490,13 +787,13 @@ export default function DetectionPage() {
                 </div>
                 <div className="text-center">
                   <p className="text-2xl font-bold font-mono text-primary">{objectCount}</p>
-                  <p className="text-xs text-muted-foreground">Objects</p>
+                  <p className="text-xs text-muted-foreground">Active Objects</p>
                 </div>
               </div>
             </div>
 
             {/* Smart Reticle Live Target Lock (Universal Detector for Any Item) */}
-            {focusedItem && focusedItem.probability > 0.25 && (
+            {focusedItem && focusedItem.probability >= 0.16 && (
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -512,17 +809,17 @@ export default function DetectionPage() {
                   </span>
                 </div>
                 <p className="text-lg font-bold text-foreground capitalize truncate">
-                  {focusedItem.className.split(",")[0]}
+                  {cleanClassName(focusedItem.className)}
                 </p>
                 <p className="text-xs text-muted-foreground mt-0.5 truncate">
-                  {focusedItem.className}
+                  Category: {focusedItem.className}
                 </p>
               </motion.div>
             )}
 
             <div className="hover-card rounded-xl p-4 sm:p-5">
               <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">Search Objects</h3>
-              <ObjectSearchBar value={searchFilter} onChange={setSearchFilter} placeholder="Filter detections..." />
+              <ObjectSearchBar value={searchFilter} onChange={setSearchFilter} placeholder="Filter detections (e.g. pen, watch, laptop)..." />
             </div>
 
             {/* Detailed Everyday Item Classifier (1000+ Categories) */}
@@ -531,7 +828,9 @@ export default function DetectionPage() {
                 <h3 className="text-xs font-semibold text-primary uppercase tracking-wider flex items-center gap-1.5">
                   <span>✨ 1000+ Universal Classifier</span>
                 </h3>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono font-medium">ImageNet Deep CNN</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono font-medium">
+                  ImageNet Deep CNN
+                </span>
               </div>
               <p className="text-xs text-muted-foreground mb-3 leading-relaxed">
                 Aim reticle at any object (pen, watch, notebook, keys, glasses, tools) in front of the lens.
@@ -543,7 +842,7 @@ export default function DetectionPage() {
                   {detailedItems.map((item, idx) => (
                     <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-secondary/50 text-xs">
                       <span className="font-medium text-foreground capitalize truncate max-w-[170px]" title={item.className}>
-                        {item.className.split(",")[0]}
+                        {cleanClassName(item.className)}
                       </span>
                       <span className="font-mono text-primary font-semibold">
                         {(item.probability * 100).toFixed(0)}%
@@ -554,16 +853,30 @@ export default function DetectionPage() {
               )}
             </div>
 
+            {/* Live Tracked Detections List */}
             <div className="hover-card rounded-xl p-4 sm:p-5">
-              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-4">Live Detections</h3>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Live Detections</h3>
+                <span className="text-xs font-mono text-primary font-semibold">{filteredDetections.length} Total</span>
+              </div>
               {filteredDetections.length === 0 ? (
-                <p className="text-sm text-muted-foreground">{searchFilter ? "No matching objects" : "No objects detected"}</p>
+                <p className="text-sm text-muted-foreground">
+                  {searchFilter ? "No matching objects" : "No objects currently detected. Aim camera or tap video to scan."}
+                </p>
               ) : (
                 <div className="space-y-2 max-h-64 overflow-y-auto">
                   {filteredDetections.map((d, i) => (
-                    <motion.div key={`${d.class}-${d.trackId}-${i}`} initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} className="flex items-center justify-between p-2 rounded-lg bg-secondary/50">
-                      <span className="text-sm font-medium text-foreground capitalize">{d.class} #{d.trackId}</span>
-                      <span className="text-xs font-mono text-primary">{(d.score * 100).toFixed(1)}%</span>
+                    <motion.div
+                      key={`${d.class}-${d.trackId}-${i}`}
+                      initial={{ opacity: 0, x: 10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className="flex items-center justify-between p-2 rounded-lg bg-secondary/50 border border-border/50"
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <span className="w-2 h-2 rounded-full bg-primary" />
+                        <span className="text-sm font-medium text-foreground capitalize truncate">{d.class} #{d.trackId}</span>
+                      </div>
+                      <span className="text-xs font-mono text-primary font-semibold">{(d.score * 100).toFixed(1)}%</span>
                     </motion.div>
                   ))}
                 </div>
@@ -590,16 +903,27 @@ function drawDetections(
   detections.forEach((d) => {
     const [x, y, w, h] = d.bbox;
     const isHighlighted = highlightFilter && d.class.toLowerCase().includes(highlightFilter.toLowerCase());
-    const color = isHighlighted ? "hsl(45, 100%, 50%)" : "hsl(187, 100%, 45%)";
-    const bgColor = isHighlighted ? "hsla(45, 100%, 50%, 0.9)" : "hsla(187, 100%, 45%, 0.85)";
+    const isUniversal = !["person", "car", "chair", "tv", "bottle"].includes(d.class.toLowerCase());
+    
+    // Distinct vibrant color palette
+    const color = isHighlighted
+      ? "hsl(45, 100%, 50%)"
+      : isUniversal
+      ? "#10b981"
+      : "hsl(187, 100%, 45%)";
+    const bgColor = isHighlighted
+      ? "hsla(45, 100%, 50%, 0.9)"
+      : isUniversal
+      ? "rgba(16, 185, 129, 0.9)"
+      : "hsla(187, 100%, 45%, 0.85)";
 
     ctx.strokeStyle = color;
     ctx.lineWidth = isHighlighted ? 3 : 2;
     ctx.strokeRect(x, y, w, h);
 
-    // Corner accents
-    const corner = Math.min(10, w / 4, h / 4);
-    ctx.strokeStyle = isHighlighted ? "#ffffff" : "#38bdf8";
+    // Corner brackets
+    const corner = Math.min(12, w / 4, h / 4);
+    ctx.strokeStyle = isHighlighted ? "#ffffff" : isUniversal ? "#34d399" : "#38bdf8";
     ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(x, y + corner); ctx.lineTo(x, y); ctx.lineTo(x + corner, y); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x + w - corner, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + corner); ctx.stroke();
@@ -609,24 +933,25 @@ function drawDetections(
     const label = showTrackId
       ? `${d.class} #${d.trackId} ${(d.score * 100).toFixed(0)}%`
       : `${d.class} ${(d.score * 100).toFixed(0)}%`;
-    ctx.font = isHighlighted ? "bold 13px Inter, sans-serif" : "12px Inter, sans-serif";
+    ctx.font = isHighlighted ? "bold 13px Inter, sans-serif" : "bold 12px Inter, sans-serif";
     const textW = ctx.measureText(label).width;
+
     ctx.fillStyle = bgColor;
-    ctx.fillRect(x, y - 22, textW + 12, 22);
+    ctx.fillRect(x, y - 24, textW + 12, 24);
     ctx.fillStyle = "#ffffff";
-    ctx.fillText(label, x + 6, y - 6);
+    ctx.fillText(label, x + 6, y - 7);
   });
 
-  // 2. Futuristic Smart Reticle (Universal Item Scanner for Any Object in the world)
+  // 2. Futuristic Smart Reticle (Universal Item Scanner for Any Object in the room)
   if (showReticle) {
-    const size = Math.min(220, Math.min(ctx.canvas.width, ctx.canvas.height) * 0.45);
+    const size = Math.min(220, Math.min(ctx.canvas.width, ctx.canvas.height) * 0.46);
     const cx = ctx.canvas.width / 2;
     const cy = ctx.canvas.height / 2;
     const rx = cx - size / 2;
     const ry = cy - size / 2;
     const bracket = 24;
 
-    const hasTarget = focusedItem && focusedItem.probability > 0.25;
+    const hasTarget = focusedItem && focusedItem.probability >= 0.16;
     const reticleColor = hasTarget ? "rgba(34, 197, 94, 0.9)" : "rgba(56, 189, 248, 0.65)";
 
     ctx.save();
@@ -647,11 +972,11 @@ function drawDetections(
 
     // Reticle Label
     if (hasTarget) {
-      const topName = focusedItem.className.split(",")[0];
+      const topName = cleanClassName(focusedItem.className);
       const targetText = `🎯 TARGET: ${topName.toUpperCase()} (${(focusedItem.probability * 100).toFixed(0)}%)`;
       ctx.font = "bold 13px Inter, sans-serif";
       const w = ctx.measureText(targetText).width;
-      ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+      ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
       ctx.fillRect(cx - w / 2 - 8, ry - 28, w + 16, 24);
       ctx.strokeStyle = "rgba(34, 197, 94, 0.9)";
       ctx.strokeRect(cx - w / 2 - 8, ry - 28, w + 16, 24);
@@ -661,7 +986,7 @@ function drawDetections(
       ctx.font = "11px Inter, sans-serif";
       const hint = "AIM AT ANY OBJECT (PEN, WATCH, KEYS, ETC.)";
       const w = ctx.measureText(hint).width;
-      ctx.fillStyle = "rgba(15, 23, 42, 0.65)";
+      ctx.fillStyle = "rgba(15, 23, 42, 0.7)";
       ctx.fillRect(cx - w / 2 - 6, ry - 22, w + 12, 18);
       ctx.fillStyle = "rgba(148, 163, 184, 0.9)";
       ctx.fillText(hint, cx - w / 2, ry - 8);
