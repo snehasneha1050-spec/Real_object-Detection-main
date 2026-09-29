@@ -134,3 +134,23 @@ export const classifyObjects = (
   input: HTMLImageElement | HTMLVideoElement | ImageData | HTMLCanvasElement,
   topK: number = 3
 ) => detector.classify(input, topK);
+
+export { tf };
+
+export function getTensorFlowStats() {
+  try {
+    const mem = tf.memory();
+    const backend = tf.getBackend();
+    return {
+      backend: backend || "webgl",
+      numTensors: mem.numTensors || 0,
+      numBytes: mem.numBytes || 0,
+    };
+  } catch {
+    return {
+      backend: "webgl",
+      numTensors: 0,
+      numBytes: 0,
+    };
+  }
+}
