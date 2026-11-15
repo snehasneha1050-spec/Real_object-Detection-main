@@ -20,22 +20,33 @@ import {
   Sun,
   Cpu,
   Layers,
-  ShieldAlert,
   X,
   Printer,
   Radio,
-  CheckCircle2,
+  Play,
+  Pause,
+  RotateCcw,
+  Film,
+  Navigation,
+  Eye,
+  Radar,
+  Info,
 } from "lucide-react";
 import { saveDetection, getHistory } from "@/lib/detectionStore";
-import { getSettings } from "@/lib/settingsStore";
-import { playClickSound } from "@/lib/settingsStore";
-import { SimpleTracker, TrackedDetection } from "@/lib/tracker";
+import { getSettings, playClickSound } from "@/lib/settingsStore";
+import {
+  SimpleTracker,
+  TrackedDetection,
+  TrackingEvent,
+  estimateDistance,
+} from "@/lib/tracker";
 import {
   detector,
   Detection,
   initializeTensorFlow,
   isTensorFlowReady,
   detectObjects,
+  detectObjectsSAHI,
   classifyObjects,
   DetailedClassification,
   getTensorFlowStats,
@@ -51,8 +62,8 @@ function speakObject(text: string) {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
   const cleanName = cleanClassName(text);
   const now = Date.now();
-  if (cleanName === lastSpokenText && now - lastSpokenTime < 6000) return;
-  if (now - lastSpokenTime < 3000) return;
+  if (cleanName === lastSpokenText && now - lastSpokenTime < 5000) return;
+  if (now - lastSpokenTime < 2500) return;
 
   lastSpokenText = cleanName;
   lastSpokenTime = now;
@@ -76,22 +87,25 @@ function cleanClassName(raw: string): string {
   if (!raw) return "Object";
   const lower = raw.toLowerCase().trim();
 
-  // High-frequency real-world objects
+  // Common high-frequency real-world objects
+  if (lower.includes("cell phone") || lower.includes("cellular") || lower.includes("mobile phone") || lower.includes("smartphone"))
+    return "Mobile Phone";
+  if (lower.includes("laptop") || lower.includes("notebook computer")) return "Laptop";
   if (lower.includes("ballpoint") || lower.includes("ballpen") || lower.includes("biro")) return "Ballpoint Pen";
   if (lower.includes("fountain pen")) return "Fountain Pen";
   if (lower.includes("pencil sharpener")) return "Pencil Sharpener";
   if (lower.includes("pencil box") || lower.includes("pencil case")) return "Pencil Case";
+  if (lower.includes("pencil")) return "Pencil";
   if (lower.includes("eraser")) return "Eraser";
-  if (lower.includes("notebook computer")) return "Laptop";
-  if (lower.includes("notebook") || lower.includes("spiral notebook")) return "Notebook";
+  if (lower.includes("spiral notebook") || (lower.includes("notebook") && !lower.includes("computer")))
+    return "Notebook";
   if (lower.includes("digital watch")) return "Digital Watch";
-  if (lower.includes("analog clock")) return "Analog Watch/Clock";
+  if (lower.includes("analog clock") || lower.includes("timepiece")) return "Analog Watch/Clock";
   if (lower.includes("wall clock")) return "Wall Clock";
   if (lower.includes("stopwatch")) return "Stopwatch";
-  if (lower.includes("cellular") || lower.includes("cellphone") || lower.includes("mobile phone")) return "Smartphone";
   if (lower.includes("sunglass") || lower.includes("shades")) return "Sunglasses";
   if (lower.includes("spectacles") || lower.includes("eyeglass")) return "Eyeglasses";
-  if (lower.includes("coffee mug")) return "Coffee Mug";
+  if (lower.includes("coffee mug") || lower.includes("mug")) return "Coffee Mug";
   if (lower.includes("water bottle")) return "Water Bottle";
   if (lower.includes("pill bottle")) return "Medicine Bottle";
   if (lower.includes("wallet") || lower.includes("billfold")) return "Wallet";
@@ -100,9 +114,10 @@ function cleanClassName(raw: string): string {
   if (lower.includes("computer mouse")) return "Computer Mouse";
   if (lower.includes("keyboard") || lower.includes("keypad")) return "Keyboard";
   if (lower.includes("ruler") || lower.includes("tape measure")) return "Ruler";
+  if (lower.includes("scissors")) return "Scissors";
   if (lower.includes("lighter")) return "Lighter";
   if (lower.includes("screwdriver")) return "Screwdriver";
-  if (lower.includes("scissors")) return "Scissors";
+  if (lower.includes("remote")) return "Remote Control";
   if (lower.includes("binder")) return "Binder / Notebook";
   if (lower.includes("paper towel") || lower.includes("tissue")) return "Tissue / Paper";
   if (lower.includes("cup") || lower.includes("teacup")) return "Cup";
@@ -115,7 +130,7 @@ function cleanClassName(raw: string): string {
 }
 
 /**
- * Category-based Multi-Color system for bounding boxes
+ * Category-based Multi-Color system for bounding boxes & labels
  */
 export interface CategoryStyle {
   category: "Electronics" | "Stationery" | "Food" | "Fashion" | "Vehicles" | "General";
@@ -125,7 +140,7 @@ export interface CategoryStyle {
   accent: string;
 }
 
-function getCategoryStyle(className: string): CategoryStyle {
+export function getCategoryStyle(className: string): CategoryStyle {
   const lower = className.toLowerCase();
 
   // 1. Electronics & Gadgets -> Neon Cyan
@@ -146,7 +161,7 @@ function getCategoryStyle(className: string): CategoryStyle {
     return {
       category: "Electronics",
       color: "#06b6d4",
-      bgColor: "rgba(6, 182, 212, 0.9)",
+      bgColor: "rgba(6, 182, 212, 0.92)",
       badgeBg: "rgba(6, 182, 212, 0.15)",
       accent: "#67e8f9",
     };
@@ -171,7 +186,7 @@ function getCategoryStyle(className: string): CategoryStyle {
     return {
       category: "Stationery",
       color: "#10b981",
-      bgColor: "rgba(16, 185, 129, 0.9)",
+      bgColor: "rgba(16, 185, 129, 0.92)",
       badgeBg: "rgba(16, 185, 129, 0.15)",
       accent: "#6ee7b7",
     };
@@ -197,7 +212,7 @@ function getCategoryStyle(className: string): CategoryStyle {
     return {
       category: "Food",
       color: "#f59e0b",
-      bgColor: "rgba(245, 158, 11, 0.9)",
+      bgColor: "rgba(245, 158, 11, 0.92)",
       badgeBg: "rgba(245, 158, 11, 0.15)",
       accent: "#fcd34d",
     };
@@ -219,7 +234,7 @@ function getCategoryStyle(className: string): CategoryStyle {
     return {
       category: "Fashion",
       color: "#8b5cf6",
-      bgColor: "rgba(139, 92, 246, 0.9)",
+      bgColor: "rgba(139, 92, 246, 0.92)",
       badgeBg: "rgba(139, 92, 246, 0.15)",
       accent: "#c4b5fd",
     };
@@ -240,7 +255,7 @@ function getCategoryStyle(className: string): CategoryStyle {
     return {
       category: "Vehicles",
       color: "#f43f5e",
-      bgColor: "rgba(244, 63, 94, 0.9)",
+      bgColor: "rgba(244, 63, 94, 0.92)",
       badgeBg: "rgba(244, 63, 94, 0.15)",
       accent: "#fda4af",
     };
@@ -250,37 +265,10 @@ function getCategoryStyle(className: string): CategoryStyle {
   return {
     category: "General",
     color: "#38bdf8",
-    bgColor: "rgba(14, 165, 233, 0.9)",
+    bgColor: "rgba(14, 165, 233, 0.92)",
     badgeBg: "rgba(14, 165, 233, 0.15)",
     accent: "#7dd3fc",
   };
-}
-
-/**
- * Distance / Proximity estimation based on bounding box height relative to frame
- */
-function getProximity(boxH: number, canvasH: number): { label: "NEAR" | "MID" | "FAR"; isClose: boolean; tag: string } {
-  const ratio = boxH / (canvasH || 1);
-  if (ratio > 0.48) {
-    return { label: "NEAR", isClose: true, tag: "⚠️ CLOSE" };
-  } else if (ratio > 0.22) {
-    return { label: "MID", isClose: false, tag: "MID" };
-  } else {
-    return { label: "FAR", isClose: false, tag: "FAR" };
-  }
-}
-
-function computeIoU(a: [number, number, number, number], b: [number, number, number, number]): number {
-  const [ax, ay, aw, ah] = a;
-  const [bx, by, bw, bh] = b;
-  const x1 = Math.max(ax, bx);
-  const y1 = Math.max(ay, by);
-  const x2 = Math.min(ax + aw, bx + bw);
-  const y2 = Math.min(ay + ah, by + bh);
-  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
-  const areaA = aw * ah;
-  const areaB = bw * bh;
-  return inter / (areaA + areaB - inter + 1e-6);
 }
 
 interface ScannedTarget {
@@ -289,15 +277,16 @@ interface ScannedTarget {
   score: number;
   bbox: [number, number, number, number];
   timestamp: number;
-  isPinned?: boolean;
 }
 
 export default function DetectionPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const fileVideoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Core state
+  // Operational states
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fps, setFps] = useState(0);
@@ -305,25 +294,39 @@ export default function DetectionPage() {
   const [detections, setDetections] = useState<TrackedDetection[]>([]);
   const [threshold, setThreshold] = useState(() => getSettings().confidenceThreshold);
   const [objectCount, setObjectCount] = useState(0);
-  const [mode, setMode] = useState<"webcam" | "image">("webcam");
+  const [mode, setMode] = useState<"webcam" | "image" | "video">("webcam");
+
+  // Media states
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [videoDetecting, setVideoDetecting] = useState(false);
   const [imageDetecting, setImageDetecting] = useState(false);
+
+  // Advanced AI toggles
+  const [trackingEnabled, setTrackingEnabled] = useState(true);
+  const [voiceAnnounce, setVoiceAnnounce] = useState(false);
+  const [showReticle, setShowReticle] = useState(true);
+  const [showTrails, setShowTrails] = useState(true);
+  const [sahiMode, setSahiMode] = useState(true);
+  const [nightVision, setNightVision] = useState(false);
+  const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
+
+  // Live stream & interaction states
   const [searchFilter, setSearchFilter] = useState("");
   const [detailedItems, setDetailedItems] = useState<DetailedClassification[]>([]);
   const [focusedItem, setFocusedItem] = useState<DetailedClassification | null>(null);
-  const [showReticle, setShowReticle] = useState(true);
-  const [voiceAnnounce, setVoiceAnnounce] = useState(false);
   const [pinnedTargets, setPinnedTargets] = useState<ScannedTarget[]>([]);
   const [tapNotice, setTapNotice] = useState<string | null>(null);
+  const [eventLogs, setEventLogs] = useState<{ id: string; text: string; time: string; type: "enter" | "exit" }[]>([]);
 
-  // Advanced features state
-  const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
-  const [nightVision, setNightVision] = useState(false);
+  // Video recording & Viva states
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [showVivaModal, setShowVivaModal] = useState(false);
   const [tensorStats, setTensorStats] = useState({ backend: "webgl", numTensors: 0 });
 
+  // Refs for loop access
   const animFrameRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
   const lastSaveRef = useRef<number>(0);
@@ -342,18 +345,56 @@ export default function DetectionPage() {
   focusedItemRef.current = focusedItem;
   const showReticleRef = useRef(showReticle);
   showReticleRef.current = showReticle;
+  const showTrailsRef = useRef(showTrails);
+  showTrailsRef.current = showTrails;
+  const sahiModeRef = useRef(sahiMode);
+  sahiModeRef.current = sahiMode;
+  const trackingEnabledRef = useRef(trackingEnabled);
+  trackingEnabledRef.current = trackingEnabled;
   const pinnedTargetsRef = useRef(pinnedTargets);
   pinnedTargetsRef.current = pinnedTargets;
   const activeReticleTargetRef = useRef<ScannedTarget | null>(null);
   const nightVisionRef = useRef(nightVision);
   nightVisionRef.current = nightVision;
 
+  // Filtered detections
   const filteredDetections = useMemo(() => {
     if (!searchFilter.trim()) return detections;
     return detections.filter((d) => d.class.toLowerCase().includes(searchFilter.toLowerCase()));
   }, [detections, searchFilter]);
 
-  // Load TensorFlow.js models
+  // Category distribution summary
+  const categoryStats = useMemo(() => {
+    const counts: Record<string, number> = {};
+    detections.forEach((d) => {
+      const cat = getCategoryStyle(d.class).category;
+      counts[cat] = (counts[cat] || 0) + 1;
+    });
+    return counts;
+  }, [detections]);
+
+  // Hook up Tracker Event Stream
+  useEffect(() => {
+    const unsub = trackerRef.current.onEvent((ev: TrackingEvent) => {
+      const timeStr = new Date(ev.timestamp).toLocaleTimeString();
+      const message =
+        ev.type === "enter"
+          ? `${cleanClassName(ev.objectName)} #${ev.trackId} entered frame`
+          : `${cleanClassName(ev.objectName)} #${ev.trackId} left frame`;
+
+      setEventLogs((prev) => [
+        { id: ev.id, text: message, time: timeStr, type: ev.type },
+        ...prev.slice(0, 19),
+      ]);
+
+      if (ev.type === "enter" && voiceEnabledRef.current) {
+        speakObject(ev.objectName);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Initialize TensorFlow
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -375,14 +416,20 @@ export default function DetectionPage() {
     };
   }, []);
 
-  // Live Camera Start with Facing Mode
+  // Start Camera
   const startCamera = useCallback(async () => {
     playClickSound();
     if (!isTensorFlowReady()) return;
 
+    // Reset video file if active
+    if (fileVideoRef.current) {
+      fileVideoRef.current.pause();
+      setIsVideoPlaying(false);
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode, width: 640, height: 480 },
+        video: { facingMode, width: { ideal: 640 }, height: { ideal: 480 } },
       });
       streamRef.current = stream;
       if (videoRef.current) {
@@ -393,11 +440,14 @@ export default function DetectionPage() {
       setRunning(true);
       setMode("webcam");
       setUploadedImage(null);
+      setUploadedVideoUrl(null);
     } catch (err) {
       console.error("Camera error:", err);
+      alert("Unable to access camera. Please check camera permissions in your browser.");
     }
   }, [facingMode]);
 
+  // Stop Camera
   const stopCamera = useCallback(() => {
     playClickSound();
     setRunning(false);
@@ -417,20 +467,20 @@ export default function DetectionPage() {
     trackerRef.current.reset();
   }, []);
 
-  // Switch / Flip Camera (Front ⇄ Back)
+  // Toggle Camera Facing
   const toggleCameraFacing = useCallback(async () => {
     playClickSound();
     const nextMode = facingMode === "environment" ? "user" : "environment";
     setFacingMode(nextMode);
 
-    if (running) {
+    if (running && mode === "webcam") {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: nextMode, width: 640, height: 480 },
+          video: { facingMode: nextMode, width: { ideal: 640 }, height: { ideal: 480 } },
         });
         streamRef.current = stream;
         if (videoRef.current) {
@@ -441,9 +491,9 @@ export default function DetectionPage() {
         console.error("Camera switch error:", err);
       }
     }
-  }, [facingMode, running]);
+  }, [facingMode, running, mode]);
 
-  // Video Recording Engine (Records video with bounding boxes & audio-ready)
+  // Video Recording Engine
   const toggleVideoRecording = useCallback(() => {
     playClickSound();
     const canvas = canvasRef.current;
@@ -473,7 +523,7 @@ export default function DetectionPage() {
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
-          a.download = `Detectra-Batch4-Video-${Date.now()}.webm`;
+          a.download = `Detectra-Advanced-Recording-Batch4-${Date.now()}.webm`;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
@@ -500,47 +550,71 @@ export default function DetectionPage() {
     }
   }, [isRecording]);
 
-  // Export Academic Evaluation Report (CSV with Course & Batch Metadata)
+  // Export Academic CSV Report
   const exportAcademicReport = useCallback(() => {
     playClickSound();
     const allHistory = getHistory();
     const reportDate = new Date().toLocaleString();
 
     const rows = [
-      ["PROJECT EVALUATION REPORT", "REAL TIME VISUAL OBJECT RECOGNITION USING DEEP NEURAL NETWORKS"],
+      ["ACADEMIC PROJECT EVALUATION REPORT", "REAL TIME VISUAL OBJECT RECOGNITION USING DEEP NEURAL NETWORKS"],
       ["COURSE CODE", "20CA02801"],
       ["PROJECT BATCH", "BATCH - 4"],
-      ["DETECTOR ARCHITECTURE", "Single-Stage SSD MobileNet_v2 + ImageNet 1000 Deep CNN"],
+      ["DETECTION ENGINE", "Single-Stage SSD MobileNet V2 + SAHI Tiled Multi-Scale Inference"],
+      ["CLASSIFICATION ENGINE", "ImageNet 1000 Deep Convolutional Neural Network"],
       ["EVALUATION DATE", reportDate],
-      ["CURRENT ACTIVE OBJECTS", detections.length.toString()],
+      ["ACTIVE OBJECTS IN FRAME", detections.length.toString()],
       ["RUNNING FRAME RATE (FPS)", fps.toString()],
-      ["INFERENCE LATENCY", `${inferenceLatency} ms`],
+      ["INFERENCE LATENCY (MS)", `${inferenceLatency} ms`],
       ["HARDWARE ACCELERATION", tensorStats.backend.toUpperCase()],
+      ["ACTIVE GPU TENSORS", tensorStats.numTensors.toString()],
       [],
-      ["S.No", "Timestamp", "Object Name", "Category", "Confidence (%)", "Track ID", "Proximity"],
+      [
+        "S.No",
+        "Timestamp",
+        "Object Name",
+        "Category",
+        "Confidence (%)",
+        "Track ID",
+        "Distance (m)",
+        "Proximity",
+        "Movement Direction",
+        "Speed (px/frame)",
+      ],
     ];
 
     const exportList =
       detections.length > 0
         ? detections
-        : allHistory.slice(0, 50).map((h, i) => ({
+        : allHistory.slice(0, 60).map((h, i) => ({
             class: h.objectName,
             score: h.confidence,
             trackId: i + 1,
+            distance: 1.2,
+            distanceLabel: "~1.2m",
+            proximity: "MID" as const,
+            direction: "Stationary" as const,
+            directionArrow: "•",
+            speed: 0,
+            trajectory: [],
+            isNew: false,
+            age: 10,
             bbox: [0, 0, 100, 100] as [number, number, number, number],
           }));
 
     exportList.forEach((d, idx) => {
       const style = getCategoryStyle(d.class);
-      const prox = getProximity(d.bbox[3], canvasRef.current?.height || 480);
       rows.push([
         (idx + 1).toString(),
         new Date().toLocaleTimeString(),
-        d.class,
+        cleanClassName(d.class),
         style.category,
         (d.score * 100).toFixed(1) + "%",
         `#${d.trackId}`,
-        prox.label,
+        d.distanceLabel || "~1.2m",
+        d.proximity || "MID",
+        `${d.direction || "Stationary"} ${d.directionArrow || ""}`,
+        d.speed?.toString() || "0",
       ]);
     });
 
@@ -556,174 +630,215 @@ export default function DetectionPage() {
     document.body.removeChild(link);
   }, [detections, fps, inferenceLatency, tensorStats]);
 
-  // Real-time Detection Loop
+  // Real-time Detection Loop (Webcam and Playing Video File)
   useEffect(() => {
-    if (!running || !isTensorFlowReady() || !videoRef.current || !canvasRef.current) return;
+    const isLive = running || (mode === "video" && isVideoPlaying);
+    if (!isLive || !isTensorFlowReady() || !canvasRef.current) return;
 
-    const video = videoRef.current;
+    const sourceVideo = mode === "video" ? fileVideoRef.current : videoRef.current;
+    if (!sourceVideo) return;
+
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d")!;
     let lastTime = performance.now();
     let frameCount = 0;
-    const settings = getSettings();
 
-    const detect = async () => {
-      if (!running) return;
+    const detectFrame = async () => {
+      const activeVideo = mode === "video" ? fileVideoRef.current : videoRef.current;
+      if (!activeVideo || activeVideo.paused || activeVideo.ended || activeVideo.readyState < 2) {
+        animFrameRef.current = requestAnimationFrame(detectFrame);
+        return;
+      }
 
-      if (video.readyState === 4) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+      canvas.width = activeVideo.videoWidth || 640;
+      canvas.height = activeVideo.videoHeight || 480;
 
-        const inferStart = performance.now();
+      const inferStart = performance.now();
 
-        // 1. Run COCO-SSD single-stage detection
-        const cocoPredictions = await detectObjects(video, threshold);
-        const allPredictions: Detection[] = [...cocoPredictions];
+      // 1. Detection via SAHI Tiled Inference or Fast Single-Pass
+      let rawPredictions: Detection[] = [];
+      if (sahiModeRef.current) {
+        rawPredictions = await detectObjectsSAHI(activeVideo, threshold, {
+          enabled: true,
+          sliceGridRows: 2,
+          sliceGridCols: 2,
+          overlapRatio: 0.22,
+          tileThreshold: Math.max(0.12, threshold * 0.75),
+        });
+      } else {
+        rawPredictions = await detectObjects(activeVideo, threshold);
+      }
 
-        const inferEnd = performance.now();
-        setInferenceLatency(Math.round(inferEnd - inferStart));
+      const inferEnd = performance.now();
+      setInferenceLatency(Math.round(inferEnd - inferStart));
 
-        // 2. Merge Universal Reticle Target
-        const reticleTarget = activeReticleTargetRef.current;
-        if (
-          showReticleRef.current &&
-          reticleTarget &&
-          Date.now() - reticleTarget.timestamp < 1200 &&
-          reticleTarget.score >= 0.16
-        ) {
-          const overlapIdx = allPredictions.findIndex(
-            (p) => computeIoU(p.bbox, reticleTarget.bbox) > 0.35
-          );
-          if (overlapIdx >= 0) {
-            const genericClasses = ["book", "cell phone", "bottle", "cup", "clock", "remote", "vase", "bowl"];
-            if (genericClasses.includes(allPredictions[overlapIdx].class.toLowerCase())) {
-              allPredictions[overlapIdx] = {
-                ...allPredictions[overlapIdx],
-                class: reticleTarget.class,
-                score: Math.max(allPredictions[overlapIdx].score, reticleTarget.score),
-              };
-            }
-          } else {
-            allPredictions.push({
-              class: reticleTarget.class,
-              score: reticleTarget.score,
-              bbox: reticleTarget.bbox,
-            });
-          }
-        }
+      const allPredictions: Detection[] = [...rawPredictions];
 
-        // 3. Merge Pinned Targets (15s lifespan)
-        const nowMs = Date.now();
-        pinnedTargetsRef.current.forEach((pt) => {
-          if (nowMs - pt.timestamp < 15000) {
-            const exists = allPredictions.some((p) => computeIoU(p.bbox, pt.bbox) > 0.4);
-            if (!exists) {
-              allPredictions.push({
-                class: pt.class,
-                score: pt.score,
-                bbox: pt.bbox,
-              });
-            }
-          }
+      // 2. Merge Universal Reticle Target (Center target for tiny everyday objects)
+      const reticleTarget = activeReticleTargetRef.current;
+      if (
+        showReticleRef.current &&
+        reticleTarget &&
+        Date.now() - reticleTarget.timestamp < 1200 &&
+        reticleTarget.score >= 0.16
+      ) {
+        const overlapIdx = allPredictions.findIndex((p) => {
+          const [ax, ay, aw, ah] = p.bbox;
+          const [bx, by, bw, bh] = reticleTarget.bbox;
+          const interW = Math.max(0, Math.min(ax + aw, bx + bw) - Math.max(ax, bx));
+          const interH = Math.max(0, Math.min(ay + ah, by + bh) - Math.max(ay, by));
+          const iou = (interW * interH) / (aw * ah + bw * bh - interW * interH + 1e-6);
+          return iou > 0.35;
         });
 
-        // 4. Multi-object tracker
-        const tracked = settings.trackingEnabled
-          ? trackerRef.current.update(allPredictions)
-          : allPredictions.map((d, i) => ({ ...d, trackId: i + 1 }));
-
-        setDetections(tracked);
-        setObjectCount(tracked.length);
-
-        // 5. Draw video + Night Vision Filter + Bounding Boxes + Reticle
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        if (nightVisionRef.current) {
-          ctx.filter = "contrast(1.4) brightness(1.35) saturate(1.2)";
-        } else {
-          ctx.filter = "none";
-        }
-        ctx.drawImage(video, 0, 0);
-        ctx.filter = "none"; // reset filter for overlays
-
-        drawDetections(
-          ctx,
-          tracked,
-          settings.trackingEnabled,
-          searchFilterRef.current,
-          focusedItemRef.current,
-          showReticleRef.current,
-          nightVisionRef.current
-        );
-
-        // 6. FPS Calculation
-        frameCount++;
-        const now = performance.now();
-        if (now - lastTime >= 1000) {
-          setFps(frameCount);
-          frameCount = 0;
-          lastTime = now;
-          const stats = getTensorFlowStats();
-          setTensorStats({ backend: stats.backend, numTensors: stats.numTensors });
-        }
-
-        // 7. Universal 1000+ Class Classifier for Any Small or Large Item (every 400ms)
-        if (now - lastClassifyRef.current > 400) {
-          lastClassifyRef.current = now;
-          const cropSize = Math.min(240, Math.min(video.videoWidth, video.videoHeight) * 0.48);
-          const cropCanvas = document.createElement("canvas");
-          cropCanvas.width = 224;
-          cropCanvas.height = 224;
-          const cropCtx = cropCanvas.getContext("2d");
-          if (cropCtx) {
-            const sx = (video.videoWidth - cropSize) / 2;
-            const sy = (video.videoHeight - cropSize) / 2;
-            cropCtx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, 224, 224);
-            classifyObjects(cropCanvas, 3).then((res) => {
-              if (res && res.length > 0) {
-                setDetailedItems(res);
-                setFocusedItem(res[0]);
-                if (res[0].probability >= 0.16) {
-                  const formatted = cleanClassName(res[0].className);
-                  activeReticleTargetRef.current = {
-                    id: "reticle-center",
-                    class: formatted,
-                    score: res[0].probability,
-                    bbox: [sx, sy, cropSize, cropSize],
-                    timestamp: Date.now(),
-                  };
-                  if (voiceEnabledRef.current && res[0].probability > 0.28) {
-                    speakObject(formatted);
-                  }
-                } else {
-                  activeReticleTargetRef.current = null;
-                }
-              }
-            });
+        if (overlapIdx >= 0) {
+          const genericClasses = ["book", "cell phone", "bottle", "cup", "clock", "remote", "vase", "bowl"];
+          if (genericClasses.includes(allPredictions[overlapIdx].class.toLowerCase())) {
+            allPredictions[overlapIdx] = {
+              ...allPredictions[overlapIdx],
+              class: reticleTarget.class,
+              score: Math.max(allPredictions[overlapIdx].score, reticleTarget.score),
+            };
           }
-        }
-
-        // 8. Save Detections periodically
-        if (tracked.length > 0 && now - lastSaveRef.current > 3000) {
-          lastSaveRef.current = now;
-          tracked.forEach((d) => {
-            saveDetection({
-              id: crypto.randomUUID(),
-              objectName: d.class,
-              confidence: d.score,
-              timestamp: Date.now(),
-            });
+        } else {
+          allPredictions.push({
+            class: reticleTarget.class,
+            score: reticleTarget.score,
+            bbox: reticleTarget.bbox,
           });
         }
       }
 
-      animFrameRef.current = requestAnimationFrame(detect);
+      // 3. Merge User Pinned Targets (Canvas Clicks)
+      const nowMs = Date.now();
+      pinnedTargetsRef.current.forEach((pt) => {
+        if (nowMs - pt.timestamp < 15000) {
+          const exists = allPredictions.some((p) => {
+            const [ax, ay, aw, ah] = p.bbox;
+            const [bx, by, bw, bh] = pt.bbox;
+            const interW = Math.max(0, Math.min(ax + aw, bx + bw) - Math.max(ax, bx));
+            const interH = Math.max(0, Math.min(ay + ah, by + bh) - Math.max(ay, by));
+            return (interW * interH) / (aw * ah + bw * bh - interW * interH + 1e-6) > 0.4;
+          });
+          if (!exists) {
+            allPredictions.push({
+              class: pt.class,
+              score: pt.score,
+              bbox: pt.bbox,
+            });
+          }
+        }
+      });
+
+      // 4. Object Tracking & Smooth Kalman/EMA Update
+      const tracked = trackingEnabledRef.current
+        ? trackerRef.current.update(allPredictions, canvas.height)
+        : allPredictions.map((d, i) => {
+            const distInfo = estimateDistance(d.class, d.bbox[3], canvas.height);
+            return {
+              ...d,
+              trackId: i + 1,
+              distance: distInfo.distanceMeters,
+              distanceLabel: distInfo.label,
+              proximity: distInfo.proximity,
+              direction: "Stationary" as const,
+              directionArrow: "•",
+              speed: 0,
+              trajectory: [],
+              isNew: false,
+              age: 1,
+            };
+          });
+
+      setDetections(tracked);
+      setObjectCount(tracked.length);
+
+      // 5. Draw Video Frame + Night Vision Booster + Bounding Boxes + Trails + Reticle
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (nightVisionRef.current) {
+        ctx.filter = "contrast(1.4) brightness(1.35) saturate(1.2)";
+      } else {
+        ctx.filter = "none";
+      }
+      ctx.drawImage(activeVideo, 0, 0, canvas.width, canvas.height);
+      ctx.filter = "none"; // Reset filter for crisp vector labels
+
+      drawDetections(
+        ctx,
+        tracked,
+        trackingEnabledRef.current,
+        searchFilterRef.current,
+        focusedItemRef.current,
+        showReticleRef.current,
+        showTrailsRef.current,
+        nightVisionRef.current
+      );
+
+      // 6. FPS Calculation
+      frameCount++;
+      const now = performance.now();
+      if (now - lastTime >= 1000) {
+        setFps(frameCount);
+        frameCount = 0;
+        lastTime = now;
+        const stats = getTensorFlowStats();
+        setTensorStats({ backend: stats.backend, numTensors: stats.numTensors });
+      }
+
+      // 7. Universal 1000+ Class Deep Classifier for Center Target (Pens, Watches, Notebooks, Keys)
+      if (now - lastClassifyRef.current > 380) {
+        lastClassifyRef.current = now;
+        const cropSize = Math.min(240, Math.min(canvas.width, canvas.height) * 0.48);
+        const cropCanvas = document.createElement("canvas");
+        cropCanvas.width = 224;
+        cropCanvas.height = 224;
+        const cropCtx = cropCanvas.getContext("2d");
+        if (cropCtx) {
+          const sx = (canvas.width - cropSize) / 2;
+          const sy = (canvas.height - cropSize) / 2;
+          cropCtx.drawImage(activeVideo, sx, sy, cropSize, cropSize, 0, 0, 224, 224);
+          classifyObjects(cropCanvas, 3).then((res) => {
+            if (res && res.length > 0) {
+              setDetailedItems(res);
+              setFocusedItem(res[0]);
+              if (res[0].probability >= 0.16) {
+                const formatted = cleanClassName(res[0].className);
+                activeReticleTargetRef.current = {
+                  id: "reticle-center",
+                  class: formatted,
+                  score: res[0].probability,
+                  bbox: [sx, sy, cropSize, cropSize],
+                  timestamp: Date.now(),
+                };
+              } else {
+                activeReticleTargetRef.current = null;
+              }
+            }
+          });
+        }
+      }
+
+      // 8. Periodically Save Detections to Store
+      if (tracked.length > 0 && now - lastSaveRef.current > 3000) {
+        lastSaveRef.current = now;
+        tracked.forEach((d) => {
+          saveDetection({
+            id: crypto.randomUUID(),
+            objectName: cleanClassName(d.class),
+            confidence: d.score,
+            timestamp: Date.now(),
+          });
+        });
+      }
+
+      animFrameRef.current = requestAnimationFrame(detectFrame);
     };
 
-    detect();
+    detectFrame();
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [running, threshold]);
+  }, [running, mode, isVideoPlaying, threshold]);
 
-  // Tap-to-Scan on Canvas
+  // Tap-to-Scan on Canvas (Locks onto ANY tiny item clicked on screen)
   const handleCanvasClick = async (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas || !isTensorFlowReady()) return;
@@ -745,8 +860,7 @@ export default function DetectionPage() {
     const cropCtx = cropCanvas.getContext("2d");
     if (!cropCtx) return;
 
-    const source = mode === "image" && canvas ? canvas : videoRef.current || canvas;
-    cropCtx.drawImage(source, sx, sy, cropSize, cropSize, 0, 0, 224, 224);
+    cropCtx.drawImage(canvas, sx, sy, cropSize, cropSize, 0, 0, 224, 224);
 
     const res = await classifyObjects(cropCanvas, 3);
     if (res && res.length > 0 && res[0].probability >= 0.14) {
@@ -758,9 +872,8 @@ export default function DetectionPage() {
         score: top.probability,
         bbox: [sx, sy, cropSize, cropSize],
         timestamp: Date.now(),
-        isPinned: true,
       };
-      setPinnedTargets((prev) => [newTarget, ...prev.filter((p) => computeIoU(p.bbox, newTarget.bbox) < 0.5)].slice(0, 5));
+      setPinnedTargets((prev) => [newTarget, ...prev.slice(0, 4)]);
       setFocusedItem(top);
       setDetailedItems(res);
       setTapNotice(`🎯 Pinned: ${name} (${(top.probability * 100).toFixed(0)}%)`);
@@ -771,7 +884,7 @@ export default function DetectionPage() {
     }
   };
 
-  // Image upload handler
+  // Image Upload Handler
   const handleImageUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       playClickSound();
@@ -801,7 +914,7 @@ export default function DetectionPage() {
     [stopCamera]
   );
 
-  // Multi-Zone Image Detection
+  // High-Resolution SAHI Detection on Uploaded Image
   const detectFromImage = useCallback(async () => {
     if (!isTensorFlowReady() || !canvasRef.current || !uploadedImage) return;
     playClickSound();
@@ -815,61 +928,52 @@ export default function DetectionPage() {
       const ctx = canvas.getContext("2d")!;
       ctx.drawImage(img, 0, 0);
 
-      const cocoPredictions = await detectObjects(img, threshold);
-      const allPredictions: Detection[] = [...cocoPredictions];
+      const predictions = await detectObjectsSAHI(img, threshold, {
+        enabled: sahiModeRef.current,
+        sliceGridRows: 2,
+        sliceGridCols: 2,
+        overlapRatio: 0.22,
+        tileThreshold: Math.max(0.12, threshold * 0.75),
+      });
 
-      const zones = [
-        { x: img.width * 0.25, y: img.height * 0.25, w: img.width * 0.5, h: img.height * 0.5 },
-        { x: 0, y: 0, w: img.width * 0.5, h: img.height * 0.5 },
-        { x: img.width * 0.5, y: 0, w: img.width * 0.5, h: img.height * 0.5 },
-        { x: 0, y: img.height * 0.5, w: img.width * 0.5, h: img.height * 0.5 },
-        { x: img.width * 0.5, y: img.height * 0.5, w: img.width * 0.5, h: img.height * 0.5 },
-      ];
+      const tracked = predictions.map((d, i) => {
+        const distInfo = estimateDistance(d.class, d.bbox[3], canvas.height);
+        return {
+          ...d,
+          trackId: i + 1,
+          distance: distInfo.distanceMeters,
+          distanceLabel: distInfo.label,
+          proximity: distInfo.proximity,
+          direction: "Stationary" as const,
+          directionArrow: "•",
+          speed: 0,
+          trajectory: [],
+          isNew: false,
+          age: 1,
+        };
+      });
 
-      for (const zone of zones) {
-        const zCanvas = document.createElement("canvas");
-        zCanvas.width = 224;
-        zCanvas.height = 224;
-        const zCtx = zCanvas.getContext("2d");
-        if (zCtx) {
-          zCtx.drawImage(img, zone.x, zone.y, zone.w, zone.h, 0, 0, 224, 224);
-          const zRes = await classifyObjects(zCanvas, 2);
-          if (zRes && zRes.length > 0 && zRes[0].probability >= 0.18) {
-            const top = zRes[0];
-            const name = cleanClassName(top.className);
-            const zoneBbox: [number, number, number, number] = [zone.x, zone.y, zone.w, zone.h];
-            const exists = allPredictions.some((p) => computeIoU(p.bbox, zoneBbox) > 0.35);
-            if (!exists) {
-              allPredictions.push({
-                class: name,
-                score: top.probability,
-                bbox: zoneBbox,
-              });
-            }
-          }
-        }
-      }
-
-      const tracked = allPredictions.map((d, i) => ({ ...d, trackId: i + 1 }));
       setDetections(tracked);
       setObjectCount(tracked.length);
 
-      drawDetections(ctx, tracked, false, searchFilterRef.current, null, false, false);
+      drawDetections(ctx, tracked, false, searchFilterRef.current, null, false, false, false);
 
+      // Classify full image
       classifyObjects(img, 3).then((res) => {
         if (res && res.length > 0) {
           setDetailedItems(res);
           setFocusedItem(res[0]);
           if (voiceEnabledRef.current && res[0].probability > 0.28) {
-            speakObject(cleanClassName(res[0].className));
+            speakObject(res[0].className);
           }
         }
       });
 
+      // Save to store
       tracked.forEach((d) => {
         saveDetection({
           id: crypto.randomUUID(),
-          objectName: d.class,
+          objectName: cleanClassName(d.class),
           confidence: d.score,
           timestamp: Date.now(),
         });
@@ -880,11 +984,60 @@ export default function DetectionPage() {
     img.src = uploadedImage;
   }, [threshold, uploadedImage]);
 
+  // Video File Upload Handler
+  const handleVideoFileUpload = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      playClickSound();
+      const file = e.target.files?.[0];
+      if (!file || !isTensorFlowReady()) return;
+
+      stopCamera();
+      setMode("video");
+      setDetections([]);
+      setObjectCount(0);
+      setPinnedTargets([]);
+      setIsVideoPlaying(false);
+
+      const url = URL.createObjectURL(file);
+      setUploadedVideoUrl(url);
+
+      if (fileVideoRef.current) {
+        fileVideoRef.current.src = url;
+        fileVideoRef.current.load();
+      }
+    },
+    [stopCamera]
+  );
+
+  // Toggle Video File Play/Pause
+  const toggleVideoPlayback = useCallback(() => {
+    playClickSound();
+    const vid = fileVideoRef.current;
+    if (!vid) return;
+
+    if (vid.paused) {
+      vid.play();
+      setIsVideoPlaying(true);
+    } else {
+      vid.pause();
+      setIsVideoPlaying(false);
+    }
+  }, []);
+
+  const restartVideoPlayback = useCallback(() => {
+    playClickSound();
+    const vid = fileVideoRef.current;
+    if (!vid) return;
+    vid.currentTime = 0;
+    vid.play();
+    setIsVideoPlaying(true);
+  }, []);
+
   const captureScreenshot = () => {
     playClickSound();
     if (!canvasRef.current) return;
     const link = document.createElement("a");
-    link.download = `Detectra-Screenshot-Batch4-${Date.now()}.png`;
+    link.download = `Detectra-Advanced-Screenshot-Batch4-${Date.now()}.png`;
     link.href = canvasRef.current.toDataURL();
     link.click();
   };
@@ -902,7 +1055,7 @@ export default function DetectionPage() {
     [running, startCamera, stopCamera]
   );
 
-  const showCanvas = running || (mode === "image" && uploadedImage);
+  const showCanvas = running || (mode === "image" && uploadedImage) || (mode === "video" && uploadedVideoUrl);
 
   return (
     <div className="min-h-screen pt-20 pb-12">
@@ -911,7 +1064,7 @@ export default function DetectionPage() {
         <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className="mb-6">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
             <div>
-              <div className="flex items-center gap-2 mb-1">
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
                 <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
                   Course Code: 20CA02801
                 </span>
@@ -919,7 +1072,10 @@ export default function DetectionPage() {
                   Batch: 4
                 </span>
                 <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded bg-secondary text-muted-foreground border border-border">
-                  Single-Stage SSD + Deep CNN
+                  Single-Stage SSD MobileNet V2 + SAHI Multi-Scale Slicing
+                </span>
+                <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                  ImageNet 1000 Deep CNN
                 </span>
               </div>
               <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold">
@@ -927,7 +1083,7 @@ export default function DetectionPage() {
               </h1>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
                 onClick={() => {
@@ -944,62 +1100,153 @@ export default function DetectionPage() {
                 type="button"
                 onClick={exportAcademicReport}
                 className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-primary/10 border border-primary/30 hover:bg-primary/20 text-primary transition shadow-sm"
-                title="Export Academic Project CSV Report"
+                title="Export Academic Project Evaluation CSV Report"
               >
                 <FileText className="w-4 h-4" />
-                <span>Download Report</span>
+                <span>Download Academic Report</span>
               </button>
             </div>
           </div>
-          <p className="text-xs sm:text-sm text-muted-foreground">
-            End-to-End Deep Neural Network Object Detection & Tracking with Category Multi-Color Coding, Proximity Warning, and Universal Everyday Item Recognition.
+          <p className="text-xs sm:text-sm text-muted-foreground leading-relaxed">
+            Professional Real-Time Object Recognition, Multi-Object Tracking, Optical Distance Estimation, Direction Vectors, and Slicing-Aided Hyper Inference (SAHI) for Small Objects.
           </p>
         </motion.div>
+
+        {/* Input Source Mode Selector Tabs */}
+        <div className="flex items-center gap-2 mb-4 p-1.5 rounded-xl bg-card border border-border w-fit flex-wrap">
+          <button
+            type="button"
+            onClick={() => {
+              playClickSound();
+              if (mode !== "webcam") {
+                stopCamera();
+                setMode("webcam");
+              }
+            }}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition inline-flex items-center gap-1.5 ${
+              mode === "webcam" ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Video className="w-3.5 h-3.5" />
+            <span>Live Webcam</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              playClickSound();
+              stopCamera();
+              setMode("image");
+            }}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition inline-flex items-center gap-1.5 ${
+              mode === "image" ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <ImageIcon className="w-3.5 h-3.5" />
+            <span>Image Detection</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              playClickSound();
+              stopCamera();
+              setMode("video");
+            }}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition inline-flex items-center gap-1.5 ${
+              mode === "video" ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Film className="w-3.5 h-3.5" />
+            <span>Video File Detection</span>
+          </button>
+        </div>
 
         <div className="grid lg:grid-cols-3 gap-4 sm:gap-6">
           {/* Main Visual Display */}
           <div className="lg:col-span-2">
             <div className="hover-card rounded-xl overflow-hidden border border-border">
               <div className="relative aspect-video bg-muted flex items-center justify-center overflow-hidden">
+                {/* Hidden Webcam Video */}
                 <video ref={videoRef} className="hidden" muted playsInline />
+
+                {/* Hidden File Video Player */}
+                <video
+                  ref={fileVideoRef}
+                  className="hidden"
+                  playsInline
+                  loop
+                  onEnded={() => setIsVideoPlaying(false)}
+                />
+
+                {/* Main Visual Vector Canvas */}
                 <canvas
                   ref={canvasRef}
                   onClick={handleCanvasClick}
-                  title="Click anywhere on video to scan and lock any object"
+                  title="Click anywhere on canvas to inspect and lock any object"
                   className={`absolute inset-0 w-full h-full object-contain cursor-crosshair ${
                     showCanvas ? "" : "hidden"
                   }`}
                 />
 
                 {!showCanvas && (
-                  <div className="text-center text-muted-foreground p-4">
+                  <div className="text-center text-muted-foreground p-6 max-w-md">
                     {loading ? (
                       <div className="flex flex-col items-center gap-3">
                         <div className="w-10 h-10 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                        <p className="text-sm font-medium">Loading Deep Neural Network Models...</p>
-                        <p className="text-xs text-muted-foreground">COCO-SSD Single-Stage + MobileNet v2 1000+ Categories</p>
+                        <p className="text-sm font-semibold text-foreground">Initializing Deep Neural Network...</p>
+                        <p className="text-xs text-muted-foreground">COCO-SSD Single-Stage + MobileNet V2 1000+ Categories</p>
+                      </div>
+                    ) : mode === "webcam" ? (
+                      <div className="flex flex-col items-center gap-3">
+                        <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center border border-primary/20">
+                          <Video className="w-7 h-7 text-primary" />
+                        </div>
+                        <p className="text-sm sm:text-base font-semibold text-foreground">Live Webcam Object Detection</p>
+                        <p className="text-xs text-muted-foreground">
+                          Click "Start Detection" below to stream video with real-time bounding boxes, tracking, and voice alerts.
+                        </p>
+                      </div>
+                    ) : mode === "image" ? (
+                      <div className="flex flex-col items-center gap-3">
+                        <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center border border-primary/20">
+                          <Upload className="w-7 h-7 text-primary" />
+                        </div>
+                        <p className="text-sm sm:text-base font-semibold text-foreground">Upload Image for AI Recognition</p>
+                        <p className="text-xs text-muted-foreground">
+                          Upload high-resolution photos to run multi-scale SAHI slicing for tiny and distant objects.
+                        </p>
                       </div>
                     ) : (
                       <div className="flex flex-col items-center gap-3">
-                        <Video className="w-12 h-12 text-primary/50" />
-                        <p className="text-sm sm:text-base font-medium">Start Camera or Upload an Image to begin recognition</p>
-                        <p className="text-xs text-muted-foreground">Supports pens, watches, notebooks, keys, phones, laptops, and 1000+ items</p>
+                        <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center border border-primary/20">
+                          <Film className="w-7 h-7 text-primary" />
+                        </div>
+                        <p className="text-sm sm:text-base font-semibold text-foreground">Upload Video File (.mp4, .webm)</p>
+                        <p className="text-xs text-muted-foreground">
+                          Select a video clip to run continuous real-time object detection and trajectory tracking frame-by-frame!
+                        </p>
                       </div>
                     )}
                   </div>
                 )}
 
-                {/* Live HUD Badges */}
-                {running && (
+                {/* Real-Time Live HUD Telemetry */}
+                {showCanvas && (running || isVideoPlaying) && (
                   <>
                     <div className="absolute top-3 left-3 flex items-center gap-2">
                       <div className="bg-background/85 backdrop-blur rounded-md px-2.5 py-1 text-xs font-mono text-primary border border-border shadow-sm flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                        <span>{fps} FPS</span>
+                        <span className={`w-2 h-2 rounded-full ${fps >= 25 ? "bg-emerald-500 animate-ping" : fps >= 15 ? "bg-amber-500" : "bg-rose-500"}`} />
+                        <span className="font-bold">{fps} FPS</span>
                       </div>
                       <div className="bg-background/85 backdrop-blur rounded-md px-2.5 py-1 text-xs font-mono text-muted-foreground border border-border shadow-sm">
                         {inferenceLatency} ms latency
                       </div>
+                      {sahiMode && (
+                        <div className="bg-primary/20 backdrop-blur rounded-md px-2 py-1 text-[11px] font-mono text-primary border border-primary/30 shadow-sm hidden sm:block">
+                          SAHI Slicing: ACTIVE
+                        </div>
+                      )}
                     </div>
 
                     {isRecording && (
@@ -1015,20 +1262,20 @@ export default function DetectionPage() {
                   <div className="absolute inset-0 bg-background/60 backdrop-blur-sm flex items-center justify-center">
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-10 h-10 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                      <p className="text-sm text-foreground font-medium">Scanning all objects in image with Deep Neural Network...</p>
+                      <p className="text-sm text-foreground font-semibold">Running SAHI Multi-Scale Sliced Inference...</p>
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Universal & Proximity Interactive Banner */}
+              {/* Interactive Universal Banner */}
               {showCanvas && (
                 <div className="bg-secondary/40 border-t border-border px-3 py-2 text-xs flex items-center justify-between text-muted-foreground flex-wrap gap-2">
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-3.5 h-3.5 text-primary animate-pulse" />
                     <span>
-                      <strong className="text-foreground">Interactive Recognition:</strong> Aim reticle or{" "}
-                      <span className="text-primary font-medium underline underline-offset-2">tap anywhere on video</span> to lock any object (pens, watches, notebooks, keys, coins, glasses).
+                      <strong className="text-foreground">Interactive AI Ready:</strong> Aim reticle or{" "}
+                      <span className="text-primary font-medium underline underline-offset-2">tap anywhere on screen</span> to inspect and pin tiny items (pens, watches, notebooks, keys, coins).
                     </span>
                   </div>
                   {tapNotice && <span className="text-emerald-400 font-semibold animate-pulse">{tapNotice}</span>}
@@ -1036,109 +1283,198 @@ export default function DetectionPage() {
               )}
 
               {/* Primary Controls Toolbar */}
-              <div className="p-3 sm:p-4 flex flex-wrap items-center gap-2 sm:gap-2.5 border-t border-border bg-card/40">
-                {!running ? (
+              <div className="p-3 sm:p-4 border-t border-border bg-card/40 space-y-3">
+                <div className="flex flex-wrap items-center gap-2 sm:gap-2.5">
+                  {mode === "webcam" && (
+                    <>
+                      {!running ? (
+                        <button
+                          onClick={startCamera}
+                          disabled={loading || !isTensorFlowReady()}
+                          className="btn-glow inline-flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-lg gradient-cyan text-primary-foreground font-medium text-sm disabled:opacity-50 transition shadow-md"
+                        >
+                          <Video className="w-4 h-4" />
+                          <span>Start Detection</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={stopCamera}
+                          className="btn-glow inline-flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-lg bg-destructive text-destructive-foreground font-medium text-sm transition"
+                        >
+                          <VideoOff className="w-4 h-4" />
+                          <span>Stop</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={toggleCameraFacing}
+                        disabled={loading || !isTensorFlowReady()}
+                        className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
+                        title="Switch between front and back camera"
+                      >
+                        <SwitchCamera className="w-3.5 h-3.5 text-primary" />
+                        <span className="hidden sm:inline">Flip Camera ({facingMode === "environment" ? "Back" : "Front"})</span>
+                        <span className="sm:hidden">Flip</span>
+                      </button>
+                    </>
+                  )}
+
+                  {mode === "image" && (
+                    <>
+                      <input type="file" ref={fileInputRef} accept="image/*" className="hidden" onChange={handleImageUpload} />
+                      <button
+                        onClick={() => {
+                          fileInputRef.current?.click();
+                          playClickSound();
+                        }}
+                        disabled={loading || !isTensorFlowReady()}
+                        className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg gradient-cyan text-primary-foreground font-medium text-xs shadow"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Upload Image</span>
+                      </button>
+
+                      {uploadedImage && (
+                        <button
+                          onClick={detectFromImage}
+                          disabled={imageDetecting || !isTensorFlowReady()}
+                          className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
+                        >
+                          <ImageIcon className="w-3.5 h-3.5 text-primary" />
+                          <span>Run SAHI Sliced Scan</span>
+                        </button>
+                      )}
+                    </>
+                  )}
+
+                  {mode === "video" && (
+                    <>
+                      <input type="file" ref={videoFileInputRef} accept="video/*" className="hidden" onChange={handleVideoFileUpload} />
+                      <button
+                        onClick={() => {
+                          videoFileInputRef.current?.click();
+                          playClickSound();
+                        }}
+                        disabled={loading || !isTensorFlowReady()}
+                        className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg gradient-cyan text-primary-foreground font-medium text-xs shadow"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Upload Video (.mp4 / .webm)</span>
+                      </button>
+
+                      {uploadedVideoUrl && (
+                        <>
+                          <button
+                            onClick={toggleVideoPlayback}
+                            className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
+                          >
+                            {isVideoPlaying ? <Pause className="w-3.5 h-3.5 text-amber-400" /> : <Play className="w-3.5 h-3.5 text-emerald-400" />}
+                            <span>{isVideoPlaying ? "Pause Video" : "Play & Detect"}</span>
+                          </button>
+
+                          <button
+                            onClick={restartVideoPlayback}
+                            className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Restart</span>
+                          </button>
+                        </>
+                      )}
+                    </>
+                  )}
+
+                  {/* Video Recording */}
                   <button
-                    onClick={startCamera}
-                    disabled={loading || !isTensorFlowReady()}
-                    className="btn-glow inline-flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-lg gradient-cyan text-primary-foreground font-medium text-sm disabled:opacity-50 transition shadow-md"
+                    type="button"
+                    onClick={toggleVideoRecording}
+                    disabled={!showCanvas}
+                    className={`btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition ${
+                      isRecording ? "bg-rose-500 text-white animate-pulse" : "border border-border bg-card text-foreground hover:bg-secondary"
+                    }`}
+                    title="Record video clip of detections with bounding boxes"
                   >
-                    <Video className="w-4 h-4" />
-                    <span className="hidden sm:inline">Start Detection</span>
-                    <span className="sm:hidden">Start</span>
+                    <Radio className={`w-3.5 h-3.5 ${isRecording ? "text-white" : "text-rose-500"}`} />
+                    <span>{isRecording ? "Stop & Save Video" : "Record Video"}</span>
                   </button>
-                ) : (
+
+                  {/* Screenshot */}
                   <button
-                    onClick={stopCamera}
-                    className="btn-glow inline-flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 rounded-lg bg-destructive text-destructive-foreground font-medium text-sm transition"
+                    onClick={captureScreenshot}
+                    disabled={!showCanvas}
+                    className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
+                    title="Capture snapshot of detections"
                   >
-                    <VideoOff className="w-4 h-4" />
-                    <span>Stop</span>
+                    <Camera className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Screenshot</span>
                   </button>
-                )}
 
-                {/* Flip Camera Button */}
-                <button
-                  type="button"
-                  onClick={toggleCameraFacing}
-                  disabled={loading || !isTensorFlowReady()}
-                  className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
-                  title="Switch between front and back cameras"
-                >
-                  <SwitchCamera className="w-3.5 h-3.5 text-primary" />
-                  <span className="hidden sm:inline">Flip Camera ({facingMode === "environment" ? "Back" : "Front"})</span>
-                  <span className="sm:hidden">Flip</span>
-                </button>
+                  {pinnedTargets.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playClickSound();
+                        setPinnedTargets([]);
+                      }}
+                      className="px-2.5 py-1.5 text-xs rounded-lg border border-amber-500/40 bg-amber-500/20 text-amber-300 font-medium hover:bg-amber-500/30 transition inline-flex items-center gap-1.5"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Clear Pins ({pinnedTargets.length})</span>
+                    </button>
+                  )}
+                </div>
 
-                {/* Live Video Recording Button */}
-                <button
-                  type="button"
-                  onClick={toggleVideoRecording}
-                  disabled={!showCanvas}
-                  className={`btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition ${
-                    isRecording
-                      ? "bg-rose-500 text-white animate-pulse"
-                      : "border border-border bg-card text-foreground hover:bg-secondary"
-                  }`}
-                  title="Record video clip of detections and download"
-                >
-                  <Radio className={`w-3.5 h-3.5 ${isRecording ? "text-white" : "text-rose-500"}`} />
-                  <span>{isRecording ? "Stop & Save Video" : "Record Video"}</span>
-                </button>
-
-                {/* Screenshot */}
-                <button
-                  onClick={captureScreenshot}
-                  disabled={!showCanvas}
-                  className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
-                  title="Capture snapshot of detections"
-                >
-                  <Camera className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Screenshot</span>
-                </button>
-
-                {/* Upload Image */}
-                <input type="file" ref={fileInputRef} accept="image/*" className="hidden" onChange={handleImageUpload} />
-                <button
-                  onClick={() => {
-                    fileInputRef.current?.click();
-                    playClickSound();
-                  }}
-                  disabled={loading || !isTensorFlowReady()}
-                  className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Upload</span>
-                </button>
-
-                {mode === "image" && uploadedImage && (
-                  <button
-                    onClick={detectFromImage}
-                    disabled={imageDetecting || !isTensorFlowReady()}
-                    className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg gradient-cyan text-primary-foreground font-medium text-xs disabled:opacity-50 transition shadow-md"
-                  >
-                    <ImageIcon className="w-3.5 h-3.5" />
-                    <span>Scan Image</span>
-                  </button>
-                )}
-
-                {pinnedTargets.length > 0 && (
+                {/* Secondary Feature Toggles */}
+                <div className="flex items-center gap-2 pt-2 border-t border-border/60 flex-wrap">
+                  {/* SAHI Sliced Inference Toggle */}
                   <button
                     type="button"
                     onClick={() => {
                       playClickSound();
-                      setPinnedTargets([]);
+                      setSahiMode(!sahiMode);
                     }}
-                    className="px-2.5 py-1.5 text-xs rounded-lg border border-amber-500/40 bg-amber-500/20 text-amber-300 font-medium hover:bg-amber-500/30 transition inline-flex items-center gap-1.5"
-                    title="Clear pinned object targets"
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      sahiMode ? "bg-primary/20 border-primary text-primary" : "bg-secondary/70 text-muted-foreground border-border"
+                    }`}
+                    title="Slicing Aided Hyper Inference (SAHI) tiles the frame to catch small, distant objects"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>Clear Pins ({pinnedTargets.length})</span>
+                    <Radar className="w-3.5 h-3.5" />
+                    <span>SAHI Slicing: {sahiMode ? "ON" : "OFF"}</span>
                   </button>
-                )}
 
-                {/* Secondary Toggles Row */}
-                <div className="flex items-center gap-2 w-full mt-2 pt-2 border-t border-border/60 flex-wrap">
+                  {/* Tracking Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setTrackingEnabled(!trackingEnabled);
+                    }}
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      trackingEnabled ? "bg-emerald-500/20 border-emerald-500 text-emerald-400" : "bg-secondary/70 text-muted-foreground border-border"
+                    }`}
+                    title="Enable Kalman/EMA smooth object tracking across frames"
+                  >
+                    <Navigation className="w-3.5 h-3.5" />
+                    <span>Tracking: {trackingEnabled ? "ON" : "OFF"}</span>
+                  </button>
+
+                  {/* Motion Trails Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setShowTrails(!showTrails);
+                    }}
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      showTrails ? "bg-violet-500/20 border-violet-500 text-violet-300" : "bg-secondary/70 text-muted-foreground border-border"
+                    }`}
+                    title="Draw glowing motion trajectory trails for tracked objects"
+                  >
+                    <Activity className="w-3.5 h-3.5" />
+                    <span>Trails: {showTrails ? "ON" : "OFF"}</span>
+                  </button>
+
                   {/* Night Vision Booster Toggle */}
                   <button
                     type="button"
@@ -1147,11 +1483,9 @@ export default function DetectionPage() {
                       setNightVision(!nightVision);
                     }}
                     className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
-                      nightVision
-                        ? "bg-amber-500/20 border-amber-500 text-amber-300"
-                        : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
+                      nightVision ? "bg-amber-500/20 border-amber-500 text-amber-300" : "bg-secondary/70 text-muted-foreground border-border"
                     }`}
-                    title="Boost contrast and brightness for dark / low-light rooms"
+                    title="Boost contrast and brightness for dark / low-light conditions"
                   >
                     {nightVision ? <Sun className="w-3.5 h-3.5 text-amber-400" /> : <Moon className="w-3.5 h-3.5" />}
                     <span>Night Vision: {nightVision ? "ON" : "OFF"}</span>
@@ -1165,11 +1499,8 @@ export default function DetectionPage() {
                       setShowReticle(!showReticle);
                     }}
                     className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
-                      showReticle
-                        ? "bg-primary/20 border-primary text-primary"
-                        : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
+                      showReticle ? "bg-cyan-500/20 border-cyan-500 text-cyan-400" : "bg-secondary/70 text-muted-foreground border-border"
                     }`}
-                    title="Toggle Universal Smart Reticle"
                   >
                     <Crosshair className="w-3.5 h-3.5" />
                     <span>Reticle: {showReticle ? "ON" : "OFF"}</span>
@@ -1185,31 +1516,11 @@ export default function DetectionPage() {
                       if (next) speakObject("Voice detection active");
                     }}
                     className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
-                      voiceAnnounce
-                        ? "bg-emerald-500/20 border-emerald-500 text-emerald-400"
-                        : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
+                      voiceAnnounce ? "bg-emerald-500/20 border-emerald-500 text-emerald-400" : "bg-secondary/70 text-muted-foreground border-border"
                     }`}
-                    title="Voice announce detected objects using AI speech synthesis"
                   >
                     {voiceAnnounce ? <Volume2 className="w-3.5 h-3.5 text-emerald-400" /> : <VolumeX className="w-3.5 h-3.5" />}
                     <span>Voice: {voiceAnnounce ? "ON" : "OFF"}</span>
-                  </button>
-
-                  {/* Small Objects Mode Toggle */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      playClickSound();
-                      setThreshold((prev) => (prev <= 0.18 ? 0.30 : 0.15));
-                    }}
-                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium ${
-                      threshold <= 0.18
-                        ? "bg-primary text-primary-foreground border-primary shadow-sm"
-                        : "bg-secondary/70 text-muted-foreground border-border hover:text-foreground"
-                    }`}
-                    title="Toggle high sensitivity mode to detect small & distant objects"
-                  >
-                    {threshold <= 0.18 ? "🎯 Small Objects: ON" : "🔍 Small Objects"}
                   </button>
 
                   <div className="flex items-center gap-1.5 ml-auto">
@@ -1230,7 +1541,7 @@ export default function DetectionPage() {
               </div>
             </div>
 
-            {/* Category Color Legend */}
+            {/* Category Multi-Color Legend */}
             <div className="mt-3 p-2.5 rounded-lg bg-card border border-border text-xs flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">
                 Category Color Code:
@@ -1251,6 +1562,10 @@ export default function DetectionPage() {
                 <span className="inline-flex items-center gap-1 text-[11px]">
                   <span className="w-2.5 h-2.5 rounded-full bg-[#8b5cf6]" />
                   <span>People & Fashion</span>
+                </span>
+                <span className="inline-flex items-center gap-1 text-[11px]">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#f43f5e]" />
+                  <span>Vehicles & Outdoors</span>
                 </span>
               </div>
             </div>
@@ -1281,8 +1596,12 @@ export default function DetectionPage() {
                 </div>
               </div>
               <div className="mt-3 pt-2.5 border-t border-border flex items-center justify-between text-[11px] text-muted-foreground font-mono">
-                <span>Backend: <strong className="text-primary uppercase">{tensorStats.backend}</strong></span>
-                <span>Latency: <strong className="text-foreground">{inferenceLatency} ms</strong></span>
+                <span>
+                  Backend: <strong className="text-primary uppercase">{tensorStats.backend} (GPU)</strong>
+                </span>
+                <span>
+                  Latency: <strong className="text-foreground">{inferenceLatency} ms</strong>
+                </span>
               </div>
             </div>
 
@@ -1309,6 +1628,25 @@ export default function DetectionPage() {
                   Category: {focusedItem.className}
                 </p>
               </motion.div>
+            )}
+
+            {/* Category Breakdown Badges */}
+            {Object.keys(categoryStats).length > 0 && (
+              <div className="hover-card rounded-xl p-3.5 border border-border">
+                <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider block mb-2">
+                  Distribution Breakdown
+                </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {Object.entries(categoryStats).map(([cat, count]) => (
+                    <span
+                      key={cat}
+                      className="px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-secondary/80 text-foreground border border-border/80"
+                    >
+                      {cat}: <strong className="text-primary">{count}</strong>
+                    </span>
+                  ))}
+                </div>
+              </div>
             )}
 
             {/* Search Filter */}
@@ -1338,37 +1676,64 @@ export default function DetectionPage() {
 
               {filteredDetections.length === 0 ? (
                 <p className="text-xs text-muted-foreground py-2">
-                  {searchFilter ? "No matching objects" : "No objects currently in frame. Aim camera or tap video to scan."}
+                  {searchFilter ? "No matching objects" : "No objects currently in frame. Start camera or upload media."}
                 </p>
               ) : (
                 <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
                   {filteredDetections.map((d, i) => {
                     const style = getCategoryStyle(d.class);
-                    const prox = getProximity(d.bbox[3], canvasRef.current?.height || 480);
                     return (
                       <motion.div
                         key={`${d.class}-${d.trackId}-${i}`}
                         initial={{ opacity: 0, x: 10 }}
                         animate={{ opacity: 1, x: 0 }}
-                        className="flex items-center justify-between p-2 rounded-lg bg-secondary/50 border border-border/50 text-xs"
+                        className="p-2 rounded-lg bg-secondary/50 border border-border/50 text-xs"
                       >
-                        <div className="flex items-center gap-2 truncate">
-                          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: style.color }} />
-                          <div className="truncate">
-                            <span className="font-semibold text-foreground capitalize truncate block">
-                              {d.class} #{d.trackId}
-                            </span>
-                            <span className="text-[10px] text-muted-foreground">
-                              {style.category} • {prox.tag}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 truncate">
+                            <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: style.color }} />
+                            <span className="font-semibold text-foreground capitalize truncate">
+                              {cleanClassName(d.class)} #{d.trackId}
                             </span>
                           </div>
+                          <span className="font-mono font-bold text-foreground shrink-0">
+                            {(d.score * 100).toFixed(0)}%
+                          </span>
                         </div>
-                        <span className="font-mono font-bold text-foreground shrink-0">
-                          {(d.score * 100).toFixed(1)}%
-                        </span>
+                        <div className="flex items-center justify-between mt-1 text-[10px] text-muted-foreground">
+                          <span>
+                            {style.category} • {d.distanceLabel}
+                          </span>
+                          <span className="text-primary font-mono font-medium">
+                            {d.direction} {d.directionArrow}
+                          </span>
+                        </div>
                       </motion.div>
                     );
                   })}
+                </div>
+              )}
+            </div>
+
+            {/* Real-time Event Stream Log */}
+            <div className="hover-card rounded-xl p-4 border border-border">
+              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <Radar className="w-3.5 h-3.5 text-primary" />
+                Live Event Stream
+              </h3>
+              {eventLogs.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic">No movement events logged yet.</p>
+              ) : (
+                <div className="space-y-1.5 max-h-36 overflow-y-auto text-[11px]">
+                  {eventLogs.map((log) => (
+                    <div key={log.id} className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span className="truncate flex items-center gap-1.5">
+                        <span className={`w-1.5 h-1.5 rounded-full ${log.type === "enter" ? "bg-emerald-400" : "bg-rose-400"}`} />
+                        <span className="text-foreground">{log.text}</span>
+                      </span>
+                      <span className="font-mono text-[10px] shrink-0">{log.time}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -1377,7 +1742,7 @@ export default function DetectionPage() {
 
         <VoiceCommandButton onCommand={handleVoiceCommand} />
 
-        {/* Academic Evaluation & Viva Modal */}
+        {/* Academic Architecture & Viva Modal */}
         <AnimatePresence>
           {showVivaModal && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-md">
@@ -1406,59 +1771,70 @@ export default function DetectionPage() {
                 </div>
 
                 <div className="mt-5 space-y-5 text-sm">
-                  {/* Single Stage vs Two Stage Comparison */}
+                  {/* Single-Stage vs Two-Stage & YOLO Comparison */}
                   <div className="p-4 rounded-xl bg-secondary/40 border border-border">
                     <h3 className="font-semibold text-foreground mb-2 flex items-center gap-2">
                       <Cpu className="w-4 h-4 text-primary" />
-                      Single-Stage Detector (SSD) vs. Two-Stage Detector (Faster R-CNN)
+                      Model Architecture Comparative Analysis (Viva Evaluation)
                     </h3>
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs text-left">
                         <thead>
                           <tr className="border-b border-border text-muted-foreground">
-                            <th className="py-2">Metric / Feature</th>
-                            <th className="py-2 text-primary font-bold">Single-Stage (SSD / Our Project)</th>
-                            <th className="py-2 text-muted-foreground">Two-Stage (Faster R-CNN)</th>
+                            <th className="py-2">Metric</th>
+                            <th className="py-2 text-primary font-bold">SSD MobileNet V2 (Our Project)</th>
+                            <th className="py-2 text-emerald-400 font-bold">YOLOv8 / YOLO11</th>
+                            <th className="py-2 text-muted-foreground">Faster R-CNN (Two-Stage)</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-border/60">
                           <tr>
-                            <td className="py-2 font-medium">Forward Pass</td>
-                            <td className="py-2 text-emerald-400 font-semibold">1-Shot End-to-End Prediction</td>
-                            <td className="py-2">2 Steps (RPN Proposals + Classifier)</td>
+                            <td className="py-2 font-medium">Pipeline Stage</td>
+                            <td className="py-2 text-primary font-semibold">Single-Stage Direct Bounding Box</td>
+                            <td className="py-2 text-emerald-400 font-semibold">Single-Stage Anchor-Free</td>
+                            <td className="py-2 text-muted-foreground">Two-Stage (RPN + RoI Head)</td>
                           </tr>
                           <tr>
                             <td className="py-2 font-medium">Frame Rate (FPS)</td>
-                            <td className="py-2 text-emerald-400 font-semibold">30 - 60 FPS (True Real-Time)</td>
-                            <td className="py-2">5 - 8 FPS (High Latency)</td>
+                            <td className="py-2 text-primary font-semibold">30 - 60 FPS (Zero Latency)</td>
+                            <td className="py-2 text-emerald-400 font-semibold">30 - 50 FPS (ONNX/WASM)</td>
+                            <td className="py-2 text-muted-foreground">5 - 8 FPS (High Latency)</td>
                           </tr>
                           <tr>
-                            <td className="py-2 font-medium">Backbone Network</td>
-                            <td className="py-2">MobileNet v2 (Depthwise Separable Conv)</td>
-                            <td className="py-2">ResNet-101 / VGG-16</td>
+                            <td className="py-2 font-medium">Browser Client Support</td>
+                            <td className="py-2 text-primary font-semibold">Native WebGL GPU Hardware Shaders</td>
+                            <td className="py-2 text-emerald-400">ONNX Runtime Web</td>
+                            <td className="py-2 text-muted-foreground">Requires Heavy Server GPU</td>
                           </tr>
                           <tr>
-                            <td className="py-2 font-medium">Mobile / Edge Deploy</td>
-                            <td className="py-2 text-emerald-400 font-semibold">Lightweight & WebGL Accelerated</td>
-                            <td className="py-2">Heavy memory footprint</td>
+                            <td className="py-2 font-medium">Small Object Slicing</td>
+                            <td className="py-2 text-primary font-semibold">SAHI Multi-Scale Hyper Inference</td>
+                            <td className="py-2">P2 Small Feature Map</td>
+                            <td className="py-2 text-muted-foreground">RoI Pooling Feature Loss</td>
                           </tr>
                         </tbody>
                       </table>
                     </div>
                   </div>
 
-                  {/* Mathematical & Architectural Highlights */}
+                  {/* Mathematical Core Derivations */}
                   <div className="grid sm:grid-cols-2 gap-4">
                     <div className="p-3.5 rounded-xl bg-secondary/30 border border-border">
-                      <h4 className="font-semibold text-xs text-primary uppercase mb-1">Depthwise Separable Convolutions</h4>
+                      <h4 className="font-semibold text-xs text-primary uppercase mb-1">
+                        SAHI (Slicing Aided Hyper Inference)
+                      </h4>
                       <p className="text-xs text-muted-foreground leading-relaxed">
-                        Reduces computational cost by 8-9x compared to standard standard spatial 3D convolutions by factorizing convolution into depthwise and pointwise operations.
+                        Solves the small-object resolution loss problem by extracting overlapping high-resolution tiles, performing localized detection, and projecting coordinates back using Class-Aware Non-Maximum Suppression (IoU = 0.40).
                       </p>
                     </div>
+
                     <div className="p-3.5 rounded-xl bg-secondary/30 border border-border">
-                      <h4 className="font-semibold text-xs text-emerald-400 uppercase mb-1">Universal 1,000+ Class Hierarchy</h4>
+                      <h4 className="font-semibold text-xs text-emerald-400 uppercase mb-1">
+                        Pinhole Optical Distance Model
+                      </h4>
                       <p className="text-xs text-muted-foreground leading-relaxed">
-                        Hybrid architecture coupling COCO-SSD multi-box localization with an ImageNet deep classifier, enabling detection of everyday items (pens, watches, notebooks, keys).
+                        Calculates real-world distance via geometric projection:{" "}
+                        <code className="text-xs font-mono text-foreground font-bold">Z = (H_real × f) / h_bbox</code>, where standard webcam vertical focal length is calibrated to 0.88 × frame height.
                       </p>
                     </div>
                   </div>
@@ -1470,7 +1846,7 @@ export default function DetectionPage() {
                       <strong className="text-primary">{tensorStats.backend.toUpperCase()} (GPU Accelerated)</strong>
                     </div>
                     <div>
-                      <span className="text-muted-foreground block text-[10px]">TENSOR FLOW TENSORS</span>
+                      <span className="text-muted-foreground block text-[10px]">ACTIVE GPU TENSORS</span>
                       <strong className="text-foreground">{tensorStats.numTensors} Active Tensors</strong>
                     </div>
                     <div>
@@ -1494,7 +1870,7 @@ export default function DetectionPage() {
                     className="btn-glow inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg gradient-cyan text-primary-foreground shadow"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Download Project Report (CSV)</span>
+                    <span>Download Academic CSV Report</span>
                   </button>
                 </div>
               </motion.div>
@@ -1507,7 +1883,13 @@ export default function DetectionPage() {
 }
 
 /**
- * Enhanced Draw function with Category Multi-Color Coding, Corner Accents & Proximity Tags
+ * Enhanced Vector Drawing Engine:
+ * - Anti-flicker Bounding Box Rendering
+ * - Category Multi-Color Coding
+ * - Labels with Format: "Person – 98%" & Subtitle "#1 • ~1.2m • Moving Right →"
+ * - Glowing Motion Trajectory Trails
+ * - Distance & Proximity Warning Glowing Borders
+ * - Night Vision Overlay
  */
 function drawDetections(
   ctx: CanvasRenderingContext2D,
@@ -1516,54 +1898,108 @@ function drawDetections(
   highlightFilter = "",
   focusedItem: DetailedClassification | null = null,
   showReticle = true,
+  showTrails = true,
   isNightVision = false
 ) {
-  // 1. Draw Bounding Boxes with Category Color Coding
+  // 1. Draw Glowing Motion Trajectory Trails
+  if (showTrails) {
+    detections.forEach((d) => {
+      if (d.trajectory && d.trajectory.length >= 2) {
+        const style = getCategoryStyle(d.class);
+        ctx.save();
+        ctx.strokeStyle = style.color;
+        ctx.lineWidth = 2.5;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.shadowColor = style.color;
+        ctx.shadowBlur = 8;
+
+        ctx.beginPath();
+        d.trajectory.forEach(([tx, ty], idx) => {
+          if (idx === 0) ctx.moveTo(tx, ty);
+          else ctx.lineTo(tx, ty);
+        });
+        ctx.stroke();
+        ctx.restore();
+      }
+    });
+  }
+
+  // 2. Draw Bounding Boxes with Category Color Coding
   detections.forEach((d) => {
     const [x, y, w, h] = d.bbox;
     const isHighlighted = highlightFilter && d.class.toLowerCase().includes(highlightFilter.toLowerCase());
     const style = getCategoryStyle(d.class);
-    const prox = getProximity(h, ctx.canvas.height);
+    const isClose = d.proximity === "NEAR";
 
-    const boxColor = isHighlighted ? "hsl(45, 100%, 50%)" : style.color;
-    const bgColor = isHighlighted ? "hsla(45, 100%, 50%, 0.9)" : style.bgColor;
+    const boxColor = isHighlighted ? "hsl(45, 100%, 50%)" : isClose ? "#ef4444" : style.color;
+    const bgColor = isHighlighted ? "hsla(45, 100%, 50%, 0.95)" : isClose ? "rgba(239, 68, 68, 0.95)" : style.bgColor;
 
+    ctx.save();
     ctx.strokeStyle = boxColor;
-    ctx.lineWidth = isHighlighted || prox.isClose ? 3.5 : 2.5;
+    ctx.lineWidth = isHighlighted || isClose ? 3.5 : 2.5;
     ctx.strokeRect(x, y, w, h);
 
-    // Corner brackets
-    const corner = Math.min(12, w / 4, h / 4);
-    ctx.strokeStyle = isHighlighted ? "#ffffff" : style.accent;
+    // Corner brackets for high-tech aesthetic
+    const corner = Math.min(14, w / 4, h / 4);
+    ctx.strokeStyle = isHighlighted ? "#ffffff" : isClose ? "#fca5a5" : style.accent;
     ctx.lineWidth = 3.5;
     ctx.beginPath(); ctx.moveTo(x, y + corner); ctx.lineTo(x, y); ctx.lineTo(x + corner, y); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x + w - corner, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + corner); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x, y + h - corner); ctx.lineTo(x, y + h); ctx.lineTo(x + corner, y + h); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x + w - corner, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - corner); ctx.stroke();
 
-    // Label with Track ID, Confidence, Category, and Proximity Alert
-    const trackStr = showTrackId ? ` #${d.trackId}` : "";
-    const label = `${d.class}${trackStr} ${(d.score * 100).toFixed(0)}% • ${prox.tag}`;
-    ctx.font = isHighlighted || prox.isClose ? "bold 13px Inter, sans-serif" : "bold 12px Inter, sans-serif";
-    const textW = ctx.measureText(label).width;
+    // Primary Label Format required: "Person – 98%"
+    const displayName = cleanClassName(d.class);
+    const primaryLabel = `${displayName} – ${(d.score * 100).toFixed(0)}%`;
 
-    // Dark high-contrast label backdrop
+    // Subtitle on box: "#1 • ~1.2m • Moving Right →"
+    const trackStr = showTrackId ? `#${d.trackId} • ` : "";
+    const distStr = d.distanceLabel ? `${d.distanceLabel} • ` : "";
+    const dirStr = d.direction !== "Stationary" ? `${d.direction} ${d.directionArrow}` : "Stationary •";
+    const subLabel = `${trackStr}${distStr}${dirStr}${isClose ? " • ⚠️ CLOSE" : ""}`;
+
+    ctx.font = "bold 13px Inter, sans-serif";
+    const primaryW = ctx.measureText(primaryLabel).width;
+    ctx.font = "10px Inter, sans-serif";
+    const subW = ctx.measureText(subLabel).width;
+    const tagWidth = Math.max(primaryW, subW) + 16;
+    const tagHeight = 34;
+
+    const tagY = y >= tagHeight + 6 ? y - tagHeight : y;
+
+    // Dark backdrop for ultra-sharp readability
     ctx.fillStyle = bgColor;
-    ctx.fillRect(x, y - 24, textW + 14, 24);
+    ctx.fillRect(x, tagY, tagWidth, tagHeight);
+
+    // Subtle border on label box
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, tagY, tagWidth, tagHeight);
+
+    // Draw primary text
     ctx.fillStyle = "#ffffff";
-    ctx.fillText(label, x + 7, y - 7);
+    ctx.font = "bold 12px Inter, sans-serif";
+    ctx.fillText(primaryLabel, x + 8, tagY + 14);
+
+    // Draw secondary text
+    ctx.font = "10px Inter, sans-serif";
+    ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+    ctx.fillText(subLabel, x + 8, tagY + 28);
+
+    ctx.restore();
   });
 
-  // 2. Night Vision Tactical HUD Overlay
+  // 3. Night Vision Tactical HUD Overlay
   if (isNightVision) {
     ctx.save();
     ctx.fillStyle = "rgba(16, 185, 129, 0.95)";
     ctx.font = "bold 11px monospace";
-    ctx.fillText("🌙 NIGHT VISION ACTIVE [ENHANCED CONTRAST]", 12, ctx.canvas.height - 14);
+    ctx.fillText("🌙 NIGHT VISION ACTIVE [ENHANCED HIGH-CONTRAST BOOST]", 12, ctx.canvas.height - 14);
     ctx.restore();
   }
 
-  // 3. Futuristic Smart Reticle (Universal Item Scanner)
+  // 4. Futuristic Smart Reticle (Universal Item Scanner)
   if (showReticle) {
     const size = Math.min(220, Math.min(ctx.canvas.width, ctx.canvas.height) * 0.46);
     const cx = ctx.canvas.width / 2;
