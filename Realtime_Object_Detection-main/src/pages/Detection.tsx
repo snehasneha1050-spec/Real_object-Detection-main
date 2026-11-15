@@ -31,9 +31,16 @@ import {
   Eye,
   Radar,
   Info,
+  ShieldAlert,
+  AlertTriangle,
 } from "lucide-react";
 import { saveDetection, getHistory } from "@/lib/detectionStore";
-import { getSettings, playClickSound } from "@/lib/settingsStore";
+import {
+  getSettings,
+  playClickSound,
+  playSonarBeep,
+  playIntrusionAlarm,
+} from "@/lib/settingsStore";
 import {
   SimpleTracker,
   TrackedDetection,
@@ -312,6 +319,12 @@ export default function DetectionPage() {
   const [nightVision, setNightVision] = useState(false);
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
 
+  // Feature 2, 3, 4 Advanced States:
+  const [securityZone, setSecurityZone] = useState(false);
+  const [sonarBeep, setSonarBeep] = useState(false);
+  const [backlightBoost, setBacklightBoost] = useState(false);
+  const [intrusionAlert, setIntrusionAlert] = useState<string | null>(null);
+
   // Live stream & interaction states
   const [searchFilter, setSearchFilter] = useState("");
   const [detailedItems, setDetailedItems] = useState<DetailedClassification[]>([]);
@@ -356,6 +369,14 @@ export default function DetectionPage() {
   const activeReticleTargetRef = useRef<ScannedTarget | null>(null);
   const nightVisionRef = useRef(nightVision);
   nightVisionRef.current = nightVision;
+  const securityZoneRef = useRef(securityZone);
+  securityZoneRef.current = securityZone;
+  const sonarBeepRef = useRef(sonarBeep);
+  sonarBeepRef.current = sonarBeep;
+  const backlightBoostRef = useRef(backlightBoost);
+  backlightBoostRef.current = backlightBoost;
+  const lastSonarBeepTimeRef = useRef<number>(0);
+  const lastIntrusionAlertTimeRef = useRef<number>(0);
 
   // Filtered detections
   const filteredDetections = useMemo(() => {
@@ -753,9 +774,50 @@ export default function DetectionPage() {
       setDetections(tracked);
       setObjectCount(tracked.length);
 
-      // 5. Draw Video Frame + Night Vision Booster + Bounding Boxes + Trails + Reticle
+      // 5. Virtual Security Tripwire Intrusion & Sonar Proximity Acoustic Radar
+      const loopNow = performance.now();
+      let intruderDetected: TrackedDetection | null = null;
+      if (securityZoneRef.current) {
+        const zx = canvas.width * 0.18;
+        const zy = canvas.height * 0.18;
+        const zw = canvas.width * 0.64;
+        const zh = canvas.height * 0.64;
+        for (const d of tracked) {
+          const [bx, by, bw, bh] = d.bbox;
+          const bcx = bx + bw / 2;
+          const bcy = by + bh / 2;
+          if (bcx >= zx && bcx <= zx + zw && bcy >= zy && bcy <= zy + zh) {
+            intruderDetected = d;
+            break;
+          }
+        }
+
+        if (intruderDetected) {
+          if (loopNow - lastIntrusionAlertTimeRef.current > 1600) {
+            lastIntrusionAlertTimeRef.current = loopNow;
+            playIntrusionAlarm();
+            setIntrusionAlert(`🚨 INTRUSION: ${cleanClassName(intruderDetected.class).toUpperCase()} DETECTED IN SECURITY ZONE`);
+            setTimeout(() => setIntrusionAlert(null), 2500);
+          }
+        }
+      }
+
+      // Sonar Acoustic Radar Beep
+      if (sonarBeepRef.current) {
+        const hasNearTarget = tracked.some(
+          (d) => d.proximity === "NEAR" || (d.distance && d.distance < 0.9)
+        );
+        if (hasNearTarget && loopNow - lastSonarBeepTimeRef.current > 420) {
+          lastSonarBeepTimeRef.current = loopNow;
+          playSonarBeep(1046);
+        }
+      }
+
+      // 6. Draw Video Frame + Night Vision / Backlight Booster + Bounding Boxes + Trails + Reticle
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (nightVisionRef.current) {
+      if (backlightBoostRef.current) {
+        ctx.filter = "contrast(1.48) brightness(1.24) saturate(1.25)";
+      } else if (nightVisionRef.current) {
         ctx.filter = "contrast(1.4) brightness(1.35) saturate(1.2)";
       } else {
         ctx.filter = "none";
@@ -771,7 +833,11 @@ export default function DetectionPage() {
         focusedItemRef.current,
         showReticleRef.current,
         showTrailsRef.current,
-        nightVisionRef.current
+        nightVisionRef.current,
+        securityZoneRef.current,
+        !!intruderDetected,
+        intruderDetected ? cleanClassName(intruderDetected.class) : "",
+        backlightBoostRef.current
       );
 
       // 6. FPS Calculation
@@ -894,15 +960,24 @@ export default function DetectionPage() {
       canvas.width = img.width;
       canvas.height = img.height;
       const ctx = canvas.getContext("2d")!;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (backlightBoostRef.current) {
+        ctx.filter = "contrast(1.48) brightness(1.24) saturate(1.25)";
+      } else if (nightVisionRef.current) {
+        ctx.filter = "contrast(1.4) brightness(1.35) saturate(1.2)";
+      } else {
+        ctx.filter = "none";
+      }
       ctx.drawImage(img, 0, 0);
+      ctx.filter = "none";
 
       try {
         const predictions = await detectObjectsSAHI(img, threshold, {
           enabled: true,
           sliceGridRows: 2,
           sliceGridCols: 2,
-          overlapRatio: 0.22,
-          tileThreshold: Math.max(0.12, threshold * 0.65),
+          overlapRatio: 0.25,
+          tileThreshold: Math.max(0.12, threshold * 0.60),
         });
 
         const tracked = predictions.map((d, i) => {
@@ -925,7 +1000,42 @@ export default function DetectionPage() {
         setDetections(tracked);
         setObjectCount(tracked.length);
 
-        drawDetections(ctx, tracked, false, searchFilterRef.current, null, false, false, false);
+        let intruderDetected: TrackedDetection | null = null;
+        if (securityZoneRef.current) {
+          const zx = canvas.width * 0.18;
+          const zy = canvas.height * 0.18;
+          const zw = canvas.width * 0.64;
+          const zh = canvas.height * 0.64;
+          for (const d of tracked) {
+            const [bx, by, bw, bh] = d.bbox;
+            const bcx = bx + bw / 2;
+            const bcy = by + bh / 2;
+            if (bcx >= zx && bcx <= zx + zw && bcy >= zy && bcy <= zy + zh) {
+              intruderDetected = d;
+              break;
+            }
+          }
+          if (intruderDetected) {
+            playIntrusionAlarm();
+            setIntrusionAlert(`🚨 INTRUSION: ${cleanClassName(intruderDetected.class).toUpperCase()} DETECTED IN SECURITY ZONE`);
+            setTimeout(() => setIntrusionAlert(null), 3000);
+          }
+        }
+
+        drawDetections(
+          ctx,
+          tracked,
+          false,
+          searchFilterRef.current,
+          null,
+          false,
+          false,
+          nightVisionRef.current,
+          securityZoneRef.current,
+          !!intruderDetected,
+          intruderDetected ? cleanClassName(intruderDetected.class) : "",
+          backlightBoostRef.current
+        );
 
         // Classify image details
         classifyObjects(img, 3).then((res) => {
@@ -1263,6 +1373,13 @@ export default function DetectionPage() {
                         <span>REC {Math.floor(recordSeconds / 60)}:{(recordSeconds % 60).toString().padStart(2, "0")}</span>
                       </div>
                     )}
+
+                    {intrusionAlert && (
+                      <div className="absolute top-12 left-1/2 -translate-x-1/2 bg-rose-600/95 text-white px-4 py-2 rounded-lg font-bold text-xs sm:text-sm tracking-wide shadow-2xl flex items-center gap-2 border border-white/40 animate-bounce z-20">
+                        <ShieldAlert className="w-4 h-4 text-white animate-spin" />
+                        <span>{intrusionAlert}</span>
+                      </div>
+                    )}
                   </>
                 )}
 
@@ -1529,6 +1646,59 @@ export default function DetectionPage() {
                   >
                     {voiceAnnounce ? <Volume2 className="w-3.5 h-3.5 text-emerald-400" /> : <VolumeX className="w-3.5 h-3.5" />}
                     <span>Voice: {voiceAnnounce ? "ON" : "OFF"}</span>
+                  </button>
+
+                  {/* Virtual Security Tripwire Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setSecurityZone(!securityZone);
+                    }}
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      securityZone ? "bg-rose-500/20 border-rose-500 text-rose-300" : "bg-secondary/70 text-muted-foreground border-border"
+                    }`}
+                    title="Arm Virtual Security Tripwire / Danger Zone perimeter breach detection with acoustic alarm"
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5" />
+                    <span>Tripwire: {securityZone ? "ARMED" : "OFF"}</span>
+                  </button>
+
+                  {/* Sonar Radar Proximity Beep Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      const next = !sonarBeep;
+                      setSonarBeep(next);
+                      if (next) playSonarBeep(1046);
+                    }}
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      sonarBeep ? "bg-cyan-500/20 border-cyan-500 text-cyan-300" : "bg-secondary/70 text-muted-foreground border-border"
+                    }`}
+                    title="Acoustic Sonar Radar Beeps when any object is within 0.8m proximity"
+                  >
+                    <Radio className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Sonar Beep: {sonarBeep ? "ON" : "OFF"}</span>
+                  </button>
+
+                  {/* Adaptive Backlight & Shadow Auto-Equalizer Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      setBacklightBoost(!backlightBoost);
+                      if (mode === "image" && uploadedImage) {
+                        setTimeout(detectFromImage, 50);
+                      }
+                    }}
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      backlightBoost ? "bg-amber-500/20 border-amber-500 text-amber-300" : "bg-secondary/70 text-muted-foreground border-border"
+                    }`}
+                    title="Enhance shadow details and backlit silhouette photos (e.g. sunset, harsh sunlight)"
+                  >
+                    <Sun className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Backlight Boost: {backlightBoost ? "ON" : "OFF"}</span>
                   </button>
 
                   <div className="flex items-center gap-1.5 ml-auto">
@@ -1907,8 +2077,64 @@ function drawDetections(
   focusedItem: DetailedClassification | null = null,
   showReticle = true,
   showTrails = true,
-  isNightVision = false
+  isNightVision = false,
+  isSecurityZone = false,
+  hasIntrusion = false,
+  intruderName = "",
+  isBacklightBoost = false
 ) {
+  // 0. Virtual Security Tripwire / Danger Zone Perimeter
+  if (isSecurityZone) {
+    const zx = ctx.canvas.width * 0.18;
+    const zy = ctx.canvas.height * 0.18;
+    const zw = ctx.canvas.width * 0.64;
+    const zh = ctx.canvas.height * 0.64;
+
+    ctx.save();
+    if (hasIntrusion) {
+      // Pulsing breach alarm overlay
+      ctx.fillStyle = "rgba(239, 68, 68, 0.18)";
+      ctx.fillRect(zx, zy, zw, zh);
+
+      ctx.strokeStyle = "#ef4444";
+      ctx.lineWidth = 3.5;
+      ctx.setLineDash([12, 8]);
+      ctx.strokeRect(zx, zy, zw, zh);
+      ctx.setLineDash([]);
+
+      // Top Alert Badge
+      const alertMsg = `🚨 RESTRICTED ZONE BREACHED! [TARGET: ${intruderName.toUpperCase()}]`;
+      ctx.font = "bold 13px Inter, sans-serif";
+      const bw = ctx.measureText(alertMsg).width + 24;
+      ctx.fillStyle = "#ef4444";
+      ctx.fillRect(zx + zw / 2 - bw / 2, zy - 15, bw, 30);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(zx + zw / 2 - bw / 2, zy - 15, bw, 30);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(alertMsg, zx + zw / 2 - bw / 2 + 12, zy + 5);
+    } else {
+      // Normal armed perimeter
+      ctx.strokeStyle = "rgba(245, 158, 11, 0.85)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([10, 6]);
+      ctx.strokeRect(zx, zy, zw, zh);
+      ctx.setLineDash([]);
+
+      const armedMsg = "🛡️ VIRTUAL SECURITY TRIPWIRE [ARMED - RESTRICTED ZONE]";
+      ctx.font = "bold 11px Inter, sans-serif";
+      const bw = ctx.measureText(armedMsg).width + 20;
+      ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+      ctx.fillRect(zx + zw / 2 - bw / 2, zy - 12, bw, 24);
+      ctx.strokeStyle = "rgba(245, 158, 11, 0.9)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(zx + zw / 2 - bw / 2, zy - 12, bw, 24);
+      ctx.fillStyle = "#f59e0b";
+      ctx.fillText(armedMsg, zx + zw / 2 - bw / 2 + 10, zy + 4);
+    }
+    ctx.restore();
+  }
+
   // 1. Draw Glowing Motion Trajectory Trails
   if (showTrails) {
     detections.forEach((d) => {
@@ -2004,6 +2230,19 @@ function drawDetections(
     ctx.fillStyle = "rgba(16, 185, 129, 0.95)";
     ctx.font = "bold 11px monospace";
     ctx.fillText("🌙 NIGHT VISION ACTIVE [ENHANCED HIGH-CONTRAST BOOST]", 12, ctx.canvas.height - 14);
+    ctx.restore();
+  }
+
+  // 3b. Backlight & Shadow Auto-Equalizer Indicator
+  if (isBacklightBoost) {
+    ctx.save();
+    ctx.fillStyle = "rgba(251, 191, 36, 0.95)";
+    ctx.font = "bold 11px monospace";
+    ctx.fillText(
+      "☀️ ADAPTIVE BACKLIGHT & SHADOW EQUALIZER ACTIVE [HIGH DYNAMIC RANGE]",
+      12,
+      ctx.canvas.height - (isNightVision ? 32 : 14)
+    );
     ctx.restore();
   }
 

@@ -149,12 +149,16 @@ export class TensorFlowDetector {
     const stepY = Math.round(tileH * (1 - overlap));
 
     // Multi-Scale Multi-Aspect Slices:
-    // Slices specifically handle side-by-side persons (e.g. 2 kids on a bicycle) as well as tiny objects
+    // Slices specifically handle side-by-side persons (e.g. 2 kids on a bicycle), sitting/crouching humans, as well as tiny objects
     const slices: { sx: number; sy: number; sw: number; sh: number }[] = [
       // Left vertical half (isolates passenger / left-seated person)
       { sx: 0, sy: 0, sw: Math.round(srcW * 0.65), sh: srcH },
       // Right vertical half (isolates right-seated person / front rider)
       { sx: Math.round(srcW * 0.35), sy: 0, sw: Math.round(srcW * 0.65), sh: srcH },
+      // Upper-Left Human Torso & Head Cascade (isolates sitting/occluded child or person)
+      { sx: 0, sy: 0, sw: Math.round(srcW * 0.60), sh: Math.round(srcH * 0.72) },
+      // Upper-Right Human Torso & Head Cascade
+      { sx: Math.round(srcW * 0.40), sy: 0, sw: Math.round(srcW * 0.60), sh: Math.round(srcH * 0.72) },
       // Center focal zone
       {
         sx: Math.round(srcW * 0.18),
