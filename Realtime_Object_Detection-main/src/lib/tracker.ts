@@ -198,10 +198,10 @@ export function calculateIoU(
 }
 
 /**
- * Class-Aware Non-Maximum Suppression (NMS)
- * Removes duplicate and heavily overlapping boxes of the same class
+ * Intelligent Instance & Class-Aware Non-Maximum Suppression (NMS)
+ * Removes duplicate overlapping boxes while preserving distinct adjacent/overlapping people and objects
  */
-export function applyClassNMS(detections: Detection[], iouThreshold = 0.45): Detection[] {
+export function applyClassNMS(detections: Detection[], defaultIouThreshold = 0.58): Detection[] {
   if (detections.length <= 1) return detections;
 
   // Sort descending by confidence score
@@ -214,18 +214,50 @@ export function applyClassNMS(detections: Detection[], iouThreshold = 0.45): Det
     const current = sorted[i];
     selected.push(current);
 
+    const [cx, cy, cw, ch] = current.bbox;
+    const currentCentroidX = cx + cw / 2;
+    const currentCentroidY = cy + ch / 2;
+
     for (let j = i + 1; j < sorted.length; j++) {
       if (suppressed.has(j)) continue;
       const other = sorted[j];
-      // Compare if same class or high overlap
       const sameClass = current.class.toLowerCase() === other.class.toLowerCase();
       const iouVal = calculateIoU(current.bbox, other.bbox);
 
-      if (sameClass && iouVal >= iouThreshold) {
-        suppressed.add(j);
-      } else if (iouVal >= 0.85) {
-        // High geometric overlap even across generic class duplicates
-        suppressed.add(j);
+      const [ox, oy, ow, oh] = other.bbox;
+      const otherCentroidX = ox + ow / 2;
+      const otherCentroidY = oy + oh / 2;
+
+      // Centroid spatial separation
+      const deltaX = Math.abs(currentCentroidX - otherCentroidX);
+      const deltaY = Math.abs(currentCentroidY - otherCentroidY);
+      const minW = Math.min(cw, ow);
+      const minH = Math.min(ch, oh);
+
+      if (sameClass) {
+        // Special intelligence for "person" (people sitting/standing close together, e.g. on bicycle, sofa, vehicle)
+        if (current.class.toLowerCase() === "person") {
+          // If centroids are horizontally or vertically separated, they are two distinct human bodies!
+          const isSeparatedPerson = deltaX > 0.20 * minW || deltaY > 0.28 * minH;
+
+          if (iouVal >= 0.72) {
+            // Only suppress if boxes are virtually identical (>72% overlap)
+            suppressed.add(j);
+          } else if (iouVal >= 0.50 && !isSeparatedPerson) {
+            suppressed.add(j);
+          }
+        } else {
+          // General objects
+          if (iouVal >= defaultIouThreshold) {
+            suppressed.add(j);
+          }
+        }
+      } else {
+        // Different classes (e.g. bicycle and person riding it)
+        // High overlap is normal. Only suppress if one box is virtually 92%+ identical duplicate
+        if (iouVal >= 0.92) {
+          suppressed.add(j);
+        }
       }
     }
   }

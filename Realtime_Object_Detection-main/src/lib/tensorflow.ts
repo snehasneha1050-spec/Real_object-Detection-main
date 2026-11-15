@@ -80,18 +80,22 @@ export class TensorFlowDetector {
     }
 
     try {
-      // minScore allows extracting weak candidate signals for small items
+      // minScore allows extracting weak candidate signals for small items and partially occluded people
       const minInternalScore = Math.min(Math.max(threshold, 0.05), 0.10);
       const predictions = await this.model.detect(input, 100, minInternalScore);
       const filtered = predictions
-        .filter((prediction) => prediction.score >= threshold)
+        .filter((prediction) =>
+          prediction.class.toLowerCase() === "person"
+            ? prediction.score >= Math.max(0.14, threshold * 0.70)
+            : prediction.score >= threshold
+        )
         .map((prediction) => ({
           class: prediction.class,
           score: prediction.score,
           bbox: prediction.bbox as [number, number, number, number],
         }));
 
-      return applyClassNMS(filtered, 0.45);
+      return applyClassNMS(filtered, 0.58);
     } catch (error) {
       console.error("Detection failed:", error);
       throw error;
@@ -135,8 +139,8 @@ export class TensorFlowDetector {
 
     const rows = options.sliceGridRows || 2;
     const cols = options.sliceGridCols || 2;
-    const overlap = options.overlapRatio || 0.2;
-    const tileThreshold = options.tileThreshold || Math.max(0.12, threshold * 0.75);
+    const overlap = options.overlapRatio || 0.22;
+    const tileThreshold = options.tileThreshold || Math.max(0.12, threshold * 0.65);
 
     // Calculate tile dimensions with overlap
     const tileW = Math.round(srcW / (cols - (cols - 1) * overlap));
@@ -144,44 +148,80 @@ export class TensorFlowDetector {
     const stepX = Math.round(tileW * (1 - overlap));
     const stepY = Math.round(tileH * (1 - overlap));
 
+    // Multi-Scale Multi-Aspect Slices:
+    // Slices specifically handle side-by-side persons (e.g. 2 kids on a bicycle) as well as tiny objects
+    const slices: { sx: number; sy: number; sw: number; sh: number }[] = [
+      // Left vertical half (isolates passenger / left-seated person)
+      { sx: 0, sy: 0, sw: Math.round(srcW * 0.65), sh: srcH },
+      // Right vertical half (isolates right-seated person / front rider)
+      { sx: Math.round(srcW * 0.35), sy: 0, sw: Math.round(srcW * 0.65), sh: srcH },
+      // Center focal zone
+      {
+        sx: Math.round(srcW * 0.18),
+        sy: Math.round(srcH * 0.12),
+        sw: Math.round(srcW * 0.64),
+        sh: Math.round(srcH * 0.76),
+      },
+    ];
+
+    // Add quadrant grid tiles for tiny items
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const sx = Math.min(srcW - tileW, c * stepX);
+        const sy = Math.min(srcH - tileH, r * stepY);
+        slices.push({ sx, sy, sw: tileW, sh: tileH });
+      }
+    }
+
     const tileCanvas = document.createElement("canvas");
-    tileCanvas.width = tileW;
-    tileCanvas.height = tileH;
     const tileCtx = tileCanvas.getContext("2d", { willReadFrequently: true });
     if (!tileCtx) return globalPredictions;
 
     const allDetections: Detection[] = [...globalPredictions];
 
     // 3. Infer over each slice
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const sx = Math.min(srcW - tileW, c * stepX);
-        const sy = Math.min(srcH - tileH, r * stepY);
+    for (const slice of slices) {
+      tileCanvas.width = slice.sw;
+      tileCanvas.height = slice.sh;
+      tileCtx.clearRect(0, 0, slice.sw, slice.sh);
+      tileCtx.drawImage(
+        sourceCanvas,
+        slice.sx,
+        slice.sy,
+        slice.sw,
+        slice.sh,
+        0,
+        0,
+        slice.sw,
+        slice.sh
+      );
 
-        tileCtx.clearRect(0, 0, tileW, tileH);
-        tileCtx.drawImage(sourceCanvas, sx, sy, tileW, tileH, 0, 0, tileW, tileH);
+      try {
+        const tilePredictions = await this.model.detect(tileCanvas, 30, tileThreshold);
+        for (const pred of tilePredictions) {
+          // If person, be slightly more permissive for occluded sitting postures
+          const minRequired =
+            pred.class.toLowerCase() === "person"
+              ? Math.max(0.12, tileThreshold * 0.85)
+              : tileThreshold;
 
-        try {
-          const tilePredictions = await this.model.detect(tileCanvas, 25, tileThreshold);
-          for (const pred of tilePredictions) {
-            if (pred.score >= tileThreshold) {
-              const [bx, by, bw, bh] = pred.bbox;
-              // Project back into global coordinates
-              allDetections.push({
-                class: pred.class,
-                score: pred.score,
-                bbox: [sx + bx, sy + by, bw, bh],
-              });
-            }
+          if (pred.score >= minRequired) {
+            const [bx, by, bw, bh] = pred.bbox;
+            // Project back into global coordinates
+            allDetections.push({
+              class: pred.class,
+              score: pred.score,
+              bbox: [slice.sx + bx, slice.sy + by, bw, bh],
+            });
           }
-        } catch {
-          // Continue on slice failure
         }
+      } catch {
+        // Continue on slice failure
       }
     }
 
-    // 4. Merge global + tile detections with Class-Aware NMS
-    return applyClassNMS(allDetections, 0.40);
+    // 4. Merge global + multi-scale tile detections with Intelligent Class-Aware NMS
+    return applyClassNMS(allDetections, 0.58);
   }
 
   /**

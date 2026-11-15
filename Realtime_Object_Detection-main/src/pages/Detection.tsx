@@ -884,7 +884,79 @@ export default function DetectionPage() {
     }
   };
 
-  // Image Upload Handler
+  // Core image detection runner
+  const runDetectionOnImage = useCallback(
+    async (img: HTMLImageElement) => {
+      if (!isTensorFlowReady() || !canvasRef.current) return;
+      setImageDetecting(true);
+
+      const canvas = canvasRef.current;
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+
+      try {
+        const predictions = await detectObjectsSAHI(img, threshold, {
+          enabled: true,
+          sliceGridRows: 2,
+          sliceGridCols: 2,
+          overlapRatio: 0.22,
+          tileThreshold: Math.max(0.12, threshold * 0.65),
+        });
+
+        const tracked = predictions.map((d, i) => {
+          const distInfo = estimateDistance(d.class, d.bbox[3], canvas.height);
+          return {
+            ...d,
+            trackId: i + 1,
+            distance: distInfo.distanceMeters,
+            distanceLabel: distInfo.label,
+            proximity: distInfo.proximity,
+            direction: "Stationary" as const,
+            directionArrow: "•",
+            speed: 0,
+            trajectory: [],
+            isNew: false,
+            age: 1,
+          };
+        });
+
+        setDetections(tracked);
+        setObjectCount(tracked.length);
+
+        drawDetections(ctx, tracked, false, searchFilterRef.current, null, false, false, false);
+
+        // Classify image details
+        classifyObjects(img, 3).then((res) => {
+          if (res && res.length > 0) {
+            setDetailedItems(res);
+            setFocusedItem(res[0]);
+            if (voiceEnabledRef.current && res[0].probability > 0.28) {
+              speakObject(res[0].className);
+            }
+          }
+        });
+
+        // Save to store
+        tracked.forEach((d) => {
+          saveDetection({
+            id: crypto.randomUUID(),
+            objectName: cleanClassName(d.class),
+            confidence: d.score,
+            timestamp: Date.now(),
+          });
+        });
+      } catch (err) {
+        console.error("Image detection error:", err);
+      } finally {
+        setImageDetecting(false);
+      }
+    },
+    [threshold]
+  );
+
+  // Image Upload Handler (auto-detects immediately on upload)
   const handleImageUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       playClickSound();
@@ -902,87 +974,23 @@ export default function DetectionPage() {
 
       const img = new Image();
       img.onload = () => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext("2d")!;
-        ctx.drawImage(img, 0, 0);
+        runDetectionOnImage(img);
       };
       img.src = url;
     },
-    [stopCamera]
+    [stopCamera, runDetectionOnImage]
   );
 
-  // High-Resolution SAHI Detection on Uploaded Image
-  const detectFromImage = useCallback(async () => {
-    if (!isTensorFlowReady() || !canvasRef.current || !uploadedImage) return;
+  // Manual re-scan trigger
+  const detectFromImage = useCallback(() => {
+    if (!uploadedImage) return;
     playClickSound();
-    setImageDetecting(true);
-
     const img = new Image();
-    img.onload = async () => {
-      const canvas = canvasRef.current!;
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext("2d")!;
-      ctx.drawImage(img, 0, 0);
-
-      const predictions = await detectObjectsSAHI(img, threshold, {
-        enabled: sahiModeRef.current,
-        sliceGridRows: 2,
-        sliceGridCols: 2,
-        overlapRatio: 0.22,
-        tileThreshold: Math.max(0.12, threshold * 0.75),
-      });
-
-      const tracked = predictions.map((d, i) => {
-        const distInfo = estimateDistance(d.class, d.bbox[3], canvas.height);
-        return {
-          ...d,
-          trackId: i + 1,
-          distance: distInfo.distanceMeters,
-          distanceLabel: distInfo.label,
-          proximity: distInfo.proximity,
-          direction: "Stationary" as const,
-          directionArrow: "•",
-          speed: 0,
-          trajectory: [],
-          isNew: false,
-          age: 1,
-        };
-      });
-
-      setDetections(tracked);
-      setObjectCount(tracked.length);
-
-      drawDetections(ctx, tracked, false, searchFilterRef.current, null, false, false, false);
-
-      // Classify full image
-      classifyObjects(img, 3).then((res) => {
-        if (res && res.length > 0) {
-          setDetailedItems(res);
-          setFocusedItem(res[0]);
-          if (voiceEnabledRef.current && res[0].probability > 0.28) {
-            speakObject(res[0].className);
-          }
-        }
-      });
-
-      // Save to store
-      tracked.forEach((d) => {
-        saveDetection({
-          id: crypto.randomUUID(),
-          objectName: cleanClassName(d.class),
-          confidence: d.score,
-          timestamp: Date.now(),
-        });
-      });
-
-      setImageDetecting(false);
+    img.onload = () => {
+      runDetectionOnImage(img);
     };
     img.src = uploadedImage;
-  }, [threshold, uploadedImage]);
+  }, [uploadedImage, runDetectionOnImage]);
 
   // Video File Upload Handler
   const handleVideoFileUpload = useCallback(
