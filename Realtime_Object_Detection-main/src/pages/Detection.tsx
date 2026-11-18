@@ -33,6 +33,15 @@ import {
   Info,
   ShieldAlert,
   AlertTriangle,
+  Mic,
+  MicOff,
+  Share2,
+  Copy,
+  Check,
+  Send,
+  Globe,
+  ExternalLink,
+  Mail,
 } from "lucide-react";
 import { saveDetection, getHistory } from "@/lib/detectionStore";
 import {
@@ -325,6 +334,16 @@ export default function DetectionPage() {
   const [backlightBoost, setBacklightBoost] = useState(false);
   const [intrusionAlert, setIntrusionAlert] = useState<string | null>(null);
 
+  // Universal All-Objects & Voice Memo & Photo Share States:
+  const [universalAllObjects, setUniversalAllObjects] = useState(true);
+  const [isVoiceMemoRecording, setIsVoiceMemoRecording] = useState(false);
+  const [voiceMemoSeconds, setVoiceMemoSeconds] = useState(0);
+  const [voiceMemoUrl, setVoiceMemoUrl] = useState<string | null>(null);
+  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
+  const [showPhotoModal, setShowPhotoModal] = useState(false);
+  const [photoDetections, setPhotoDetections] = useState<TrackedDetection[]>([]);
+  const [copySuccess, setCopySuccess] = useState(false);
+
   // Live stream & interaction states
   const [searchFilter, setSearchFilter] = useState("");
   const [detailedItems, setDetailedItems] = useState<DetailedClassification[]>([]);
@@ -377,6 +396,13 @@ export default function DetectionPage() {
   backlightBoostRef.current = backlightBoost;
   const lastSonarBeepTimeRef = useRef<number>(0);
   const lastIntrusionAlertTimeRef = useRef<number>(0);
+
+  const universalAllObjectsRef = useRef(universalAllObjects);
+  universalAllObjectsRef.current = universalAllObjects;
+  const voiceAudioStreamRef = useRef<MediaStream | null>(null);
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const voiceTimerRef = useRef<any>(null);
 
   // Filtered detections
   const filteredDetections = useMemo(() => {
@@ -514,18 +540,35 @@ export default function DetectionPage() {
     }
   }, [facingMode, running, mode]);
 
-  // Video Recording Engine
-  const toggleVideoRecording = useCallback(() => {
+  // Video Recording Engine (with Live Microphone Voice Commentary)
+  const toggleVideoRecording = useCallback(async () => {
     playClickSound();
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     if (!isRecording) {
       try {
-        const stream = canvas.captureStream(30);
+        let stream: MediaStream;
+        const canvasStream = canvas.captureStream(30);
+        let audioStream: MediaStream | null = null;
+        try {
+          audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (micErr) {
+          console.warn("Microphone not available, recording video without voice:", micErr);
+        }
+
+        if (audioStream && audioStream.getAudioTracks().length > 0) {
+          stream = new MediaStream([
+            ...canvasStream.getVideoTracks(),
+            ...audioStream.getAudioTracks(),
+          ]);
+        } else {
+          stream = canvasStream;
+        }
+
         const mimeTypes = [
-          "video/webm;codecs=vp9",
-          "video/webm;codecs=vp8",
+          "video/webm;codecs=vp9,opus",
+          "video/webm;codecs=vp8,opus",
           "video/webm",
           "video/mp4",
         ];
@@ -540,11 +583,14 @@ export default function DetectionPage() {
         };
 
         recorder.onstop = () => {
+          if (audioStream) {
+            audioStream.getTracks().forEach((t) => t.stop());
+          }
           const blob = new Blob(recordedChunksRef.current, { type: mimeType || "video/webm" });
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
-          a.download = `Detectra-Advanced-Recording-Batch4-${Date.now()}.webm`;
+          a.download = `Detectra-Voice-Video-Recording-Batch4-${Date.now()}.webm`;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
@@ -563,13 +609,175 @@ export default function DetectionPage() {
         console.error("Recording error:", err);
       }
     } else {
-      if (mediaRecorderRef.current) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.stop();
       }
       setIsRecording(false);
       clearInterval(recordTimerRef.current);
     }
   }, [isRecording]);
+
+  // Voice Note / Audio Memo Recorder
+  const toggleVoiceMemo = useCallback(async () => {
+    playClickSound();
+    if (!isVoiceMemoRecording) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        voiceAudioStreamRef.current = stream;
+        const mimeType = ["audio/webm", "audio/ogg", "audio/mp4", ""].find((t) =>
+          t ? MediaRecorder.isTypeSupported(t) : true
+        );
+        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        voiceChunksRef.current = [];
+
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) voiceChunksRef.current.push(e.data);
+        };
+
+        recorder.onstop = () => {
+          if (voiceAudioStreamRef.current) {
+            voiceAudioStreamRef.current.getTracks().forEach((t) => t.stop());
+            voiceAudioStreamRef.current = null;
+          }
+          const blob = new Blob(voiceChunksRef.current, { type: mimeType || "audio/webm" });
+          const url = URL.createObjectURL(blob);
+          setVoiceMemoUrl(url);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `Detectra-Voice-Memo-${Date.now()}.webm`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        };
+
+        recorder.start(250);
+        voiceRecorderRef.current = recorder;
+        setIsVoiceMemoRecording(true);
+        setVoiceMemoSeconds(0);
+
+        voiceTimerRef.current = setInterval(() => {
+          setVoiceMemoSeconds((s) => s + 1);
+        }, 1000);
+      } catch (err) {
+        console.error("Voice recording error:", err);
+        alert("Microphone permission required for voice note recording.");
+      }
+    } else {
+      if (voiceRecorderRef.current && voiceRecorderRef.current.state !== "inactive") {
+        voiceRecorderRef.current.stop();
+      }
+      setIsVoiceMemoRecording(false);
+      clearInterval(voiceTimerRef.current);
+    }
+  }, [isVoiceMemoRecording]);
+
+  // Photo Snapshot, Share & Send Sheet
+  const captureScreenshot = useCallback(() => {
+    playClickSound();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const dataUrl = canvas.toDataURL("image/png");
+    setCapturedPhoto(dataUrl);
+    setPhotoDetections([...detections]);
+    setShowPhotoModal(true);
+    setCopySuccess(false);
+  }, [detections]);
+
+  // Copy photo to clipboard
+  const copyPhotoToClipboard = useCallback(async () => {
+    if (!capturedPhoto) return;
+    playClickSound();
+    try {
+      const response = await fetch(capturedPhoto);
+      const blob = await response.blob();
+      await navigator.clipboard.write([
+        new ClipboardItem({ [blob.type || "image/png"]: blob }),
+      ]);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 3000);
+    } catch (err) {
+      console.warn("Direct clipboard image copy failed:", err);
+      const summary = photoDetections
+        .map((d) => `${cleanClassName(d.class)} (${(d.score * 100).toFixed(0)}%)`)
+        .join(", ");
+      await navigator.clipboard.writeText(
+        `Detectra AI Detection Results: ${summary}\nLive URL: https://graceful-brigadeiros-8681ef.netlify.app/detection`
+      );
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 3000);
+    }
+  }, [capturedPhoto, photoDetections]);
+
+  // Download photo directly
+  const downloadCapturedPhoto = useCallback(() => {
+    if (!capturedPhoto) return;
+    playClickSound();
+    const link = document.createElement("a");
+    link.download = `Detectra-Detection-Photo-${Date.now()}.png`;
+    link.href = capturedPhoto;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [capturedPhoto]);
+
+  // Send photo via WhatsApp
+  const shareViaWhatsApp = useCallback(() => {
+    playClickSound();
+    const summary = photoDetections.length > 0
+      ? photoDetections.map((d) => `• ${cleanClassName(d.class)} (${(d.score * 100).toFixed(0)}%)`).join("%0A")
+      : "Objects detected in real-time.";
+    const text = `📸 *Real-Time Object Detection Snapshot (Detectra AI)*%0A%0A*Detected Objects:*%0A${summary}%0A%0A👉 View Real-Time System: https://graceful-brigadeiros-8681ef.netlify.app/detection`;
+    window.open(`https://api.whatsapp.com/send?text=${text}`, "_blank");
+  }, [photoDetections]);
+
+  // Send photo via Telegram
+  const shareViaTelegram = useCallback(() => {
+    playClickSound();
+    const summary = photoDetections.map((d) => `${cleanClassName(d.class)} (${(d.score * 100).toFixed(0)}%)`).join(", ");
+    const text = `Real-Time Object Detection: ${summary}`;
+    window.open(
+      `https://t.me/share/url?url=${encodeURIComponent("https://graceful-brigadeiros-8681ef.netlify.app/detection")}&text=${encodeURIComponent(text)}`,
+      "_blank"
+    );
+  }, [photoDetections]);
+
+  // Native Web Share API
+  const shareNative = useCallback(async () => {
+    if (!capturedPhoto) return;
+    playClickSound();
+    try {
+      const response = await fetch(capturedPhoto);
+      const blob = await response.blob();
+      const file = new File([blob], `Detectra-Detection-${Date.now()}.png`, { type: "image/png" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          title: "Real-Time Object Detection Photo",
+          text: `Detectra AI detected: ${photoDetections.map((d) => cleanClassName(d.class)).join(", ")}`,
+          files: [file],
+        });
+      } else if (navigator.share) {
+        await navigator.share({
+          title: "Real-Time Object Detection Photo",
+          text: `Detectra AI detected: ${photoDetections.map((d) => cleanClassName(d.class)).join(", ")}`,
+          url: "https://graceful-brigadeiros-8681ef.netlify.app/detection",
+        });
+      }
+    } catch (err) {
+      console.warn("Web share dismissed or failed:", err);
+    }
+  }, [capturedPhoto, photoDetections]);
+
+  // Send photo via Email
+  const shareViaEmail = useCallback(() => {
+    playClickSound();
+    const summary = photoDetections.map((d) => `${cleanClassName(d.class)} (${(d.score * 100).toFixed(0)}%)`).join("\n - ");
+    const subject = encodeURIComponent("Real-Time Object Recognition Snapshot - Course 20CA02801 Batch-4");
+    const body = encodeURIComponent(
+      `Dear Professor / Examiner,\n\nPlease find the Real-Time Object Recognition snapshot details below:\n\nDetected Objects:\n - ${summary}\n\nLive Project System: https://graceful-brigadeiros-8681ef.netlify.app/detection\n\nDeep Neural Network: Single-Stage SSD MobileNet V2 + SAHI Tiled Inference`
+    );
+    window.open(`mailto:?subject=${subject}&body=${body}`);
+  }, [photoDetections]);
 
   // Export Academic CSV Report
   const exportAcademicReport = useCallback(() => {
@@ -676,18 +884,22 @@ export default function DetectionPage() {
 
       const inferStart = performance.now();
 
-      // 1. Detection via SAHI Tiled Inference or Fast Single-Pass
+      // 1. Detection via SAHI Tiled Inference or Fast Single-Pass (Ultra All-Objects Sensitivity)
+      const effectiveThreshold = universalAllObjectsRef.current
+        ? Math.min(threshold, 0.15)
+        : threshold;
+
       let rawPredictions: Detection[] = [];
-      if (sahiModeRef.current) {
-        rawPredictions = await detectObjectsSAHI(activeVideo, threshold, {
+      if (sahiModeRef.current || universalAllObjectsRef.current) {
+        rawPredictions = await detectObjectsSAHI(activeVideo, effectiveThreshold, {
           enabled: true,
           sliceGridRows: 2,
           sliceGridCols: 2,
-          overlapRatio: 0.22,
-          tileThreshold: Math.max(0.12, threshold * 0.75),
+          overlapRatio: 0.25,
+          tileThreshold: Math.max(0.10, effectiveThreshold * 0.70),
         });
       } else {
-        rawPredictions = await detectObjects(activeVideo, threshold);
+        rawPredictions = await detectObjects(activeVideo, effectiveThreshold);
       }
 
       const inferEnd = performance.now();
@@ -972,12 +1184,16 @@ export default function DetectionPage() {
       ctx.filter = "none";
 
       try {
-        const predictions = await detectObjectsSAHI(img, threshold, {
+        const effectiveThreshold = universalAllObjectsRef.current
+          ? Math.min(threshold, 0.14)
+          : threshold;
+
+        const predictions = await detectObjectsSAHI(img, effectiveThreshold, {
           enabled: true,
           sliceGridRows: 2,
           sliceGridCols: 2,
           overlapRatio: 0.25,
-          tileThreshold: Math.max(0.12, threshold * 0.60),
+          tileThreshold: Math.max(0.10, effectiveThreshold * 0.60),
         });
 
         const tracked = predictions.map((d, i) => {
@@ -1150,15 +1366,6 @@ export default function DetectionPage() {
     vid.play();
     setIsVideoPlaying(true);
   }, []);
-
-  const captureScreenshot = () => {
-    playClickSound();
-    if (!canvasRef.current) return;
-    const link = document.createElement("a");
-    link.download = `Detectra-Advanced-Screenshot-Batch4-${Date.now()}.png`;
-    link.href = canvasRef.current.toDataURL();
-    link.click();
-  };
 
   const handleVoiceCommand = useCallback(
     (result: VoiceCommandResult) => {
@@ -1365,12 +1572,24 @@ export default function DetectionPage() {
                           SAHI Slicing: ACTIVE
                         </div>
                       )}
+                      {universalAllObjects && (
+                        <div className="bg-cyan-500/20 backdrop-blur rounded-md px-2 py-1 text-[11px] font-mono text-cyan-300 border border-cyan-500/30 shadow-sm hidden sm:block">
+                          ALL OBJECTS: 1000+ ACTIVE
+                        </div>
+                      )}
                     </div>
 
                     {isRecording && (
                       <div className="absolute top-3 right-3 bg-rose-500/90 text-white backdrop-blur rounded-md px-3 py-1 text-xs font-mono font-bold flex items-center gap-2 shadow-lg animate-pulse">
                         <span className="w-2.5 h-2.5 rounded-full bg-white" />
-                        <span>REC {Math.floor(recordSeconds / 60)}:{(recordSeconds % 60).toString().padStart(2, "0")}</span>
+                        <span>VIDEO+VOICE REC {Math.floor(recordSeconds / 60)}:{(recordSeconds % 60).toString().padStart(2, "0")}</span>
+                      </div>
+                    )}
+
+                    {isVoiceMemoRecording && (
+                      <div className="absolute top-12 right-3 bg-rose-600/90 text-white backdrop-blur rounded-md px-3 py-1 text-xs font-mono font-bold flex items-center gap-2 shadow-lg animate-pulse">
+                        <Mic className="w-3 h-3 text-white animate-bounce" />
+                        <span>VOICE NOTE {voiceMemoSeconds}s</span>
                       </div>
                     )}
 
@@ -1524,15 +1743,31 @@ export default function DetectionPage() {
                     <span>{isRecording ? "Stop & Save Video" : "Record Video"}</span>
                   </button>
 
-                  {/* Screenshot */}
+                  {/* Screenshot & Share Photo */}
                   <button
+                    type="button"
                     onClick={captureScreenshot}
                     disabled={!showCanvas}
-                    className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-card text-foreground font-medium text-xs hover:bg-secondary transition"
-                    title="Capture snapshot of detections"
+                    className="btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg gradient-cyan text-primary-foreground font-semibold text-xs shadow hover:opacity-95 transition"
+                    title="Capture snapshot with detections and share/send via WhatsApp, Telegram, or Download"
                   >
                     <Camera className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Screenshot</span>
+                    <span>Take & Send Photo</span>
+                  </button>
+
+                  {/* Voice Note Memo Recorder */}
+                  <button
+                    type="button"
+                    onClick={toggleVoiceMemo}
+                    className={`btn-glow inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition ${
+                      isVoiceMemoRecording
+                        ? "bg-rose-600 text-white animate-pulse shadow-md"
+                        : "border border-border bg-card text-foreground hover:bg-secondary"
+                    }`}
+                    title="Record voice note/audio memo with microphone"
+                  >
+                    {isVoiceMemoRecording ? <MicOff className="w-3.5 h-3.5 text-white animate-spin" /> : <Mic className="w-3.5 h-3.5 text-primary" />}
+                    <span>{isVoiceMemoRecording ? `Stop Voice (${voiceMemoSeconds}s)` : "Record Voice Note"}</span>
                   </button>
 
                   {pinnedTargets.length > 0 && (
@@ -1550,8 +1785,49 @@ export default function DetectionPage() {
                   )}
                 </div>
 
+                {/* Voice Note Player Pill if recorded */}
+                {voiceMemoUrl && (
+                  <div className="p-2.5 rounded-xl bg-primary/10 border border-primary/30 flex items-center justify-between gap-3 text-xs flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <Mic className="w-4 h-4 text-primary animate-pulse" />
+                      <span className="font-semibold text-foreground">Latest Voice Note:</span>
+                      <audio src={voiceMemoUrl} controls className="h-7 w-44 sm:w-60" />
+                    </div>
+                    <a
+                      href={voiceMemoUrl}
+                      download={`Detectra-Voice-Memo-${Date.now()}.webm`}
+                      className="text-xs font-semibold text-primary underline underline-offset-2 flex items-center gap-1"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Save Audio File</span>
+                    </a>
+                  </div>
+                )}
+
                 {/* Secondary Feature Toggles */}
                 <div className="flex items-center gap-2 pt-2 border-t border-border/60 flex-wrap">
+                  {/* Universal All-Objects Mode Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playClickSound();
+                      const next = !universalAllObjects;
+                      setUniversalAllObjects(next);
+                      if (next) {
+                        setThreshold(0.14);
+                        setSahiMode(true);
+                      }
+                    }}
+                    className={`px-2.5 py-1.5 text-xs rounded-lg border transition font-medium inline-flex items-center gap-1.5 ${
+                      universalAllObjects
+                        ? "bg-cyan-500/20 border-cyan-500 text-cyan-300 shadow-sm"
+                        : "bg-secondary/70 text-muted-foreground border-border"
+                    }`}
+                    title="Universal All-Objects Mode: Detect 1000+ tiny and big objects with ultra-sensitivity"
+                  >
+                    <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>All Objects Mode: {universalAllObjects ? "ULTRA ON" : "OFF"}</span>
+                  </button>
                   {/* SAHI Sliced Inference Toggle */}
                   <button
                     type="button"
@@ -2050,6 +2326,151 @@ export default function DetectionPage() {
                     <Download className="w-3.5 h-3.5" />
                     <span>Download Academic CSV Report</span>
                   </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Photo Snapshot, Send & Share Modal */}
+        <AnimatePresence>
+          {showPhotoModal && capturedPhoto && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/85 backdrop-blur-md">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-card border border-border rounded-2xl max-w-2xl w-full p-5 sm:p-6 shadow-2xl overflow-y-auto max-h-[92vh]"
+              >
+                <div className="flex items-center justify-between pb-3 border-b border-border">
+                  <div className="flex items-center gap-2">
+                    <Camera className="w-5 h-5 text-primary" />
+                    <div>
+                      <h3 className="text-base sm:text-lg font-bold text-foreground">
+                        Object Recognition Photo Snapshot
+                      </h3>
+                      <p className="text-xs text-muted-foreground">
+                        Captured with Neural Network bounding boxes & labels
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowPhotoModal(false)}
+                    className="p-1.5 rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* High-res Image Preview */}
+                <div className="mt-4 rounded-xl overflow-hidden border border-border/80 bg-black/40 relative shadow-inner">
+                  <img
+                    src={capturedPhoto}
+                    alt="Captured Object Detection"
+                    className="w-full max-h-[48vh] object-contain mx-auto"
+                  />
+                  <div className="absolute bottom-2 left-2 bg-black/75 backdrop-blur px-2.5 py-1 rounded-md text-[11px] font-mono text-white/90">
+                    {photoDetections.length} Objects Detected
+                  </div>
+                </div>
+
+                {/* Detected Objects Summary Pills */}
+                <div className="mt-4 p-3 rounded-xl bg-secondary/40 border border-border">
+                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider block mb-2">
+                    Detected Items in this Photo:
+                  </span>
+                  {photoDetections.length === 0 ? (
+                    <span className="text-xs text-muted-foreground italic">No objects currently in frame.</span>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {photoDetections.map((d, idx) => {
+                        const style = getCategoryStyle(d.class);
+                        return (
+                          <span
+                            key={idx}
+                            style={{ backgroundColor: style.badgeBg, borderColor: style.color }}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold text-foreground"
+                          >
+                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: style.color }} />
+                            <span>{cleanClassName(d.class)}</span>
+                            <span className="text-muted-foreground font-mono font-normal">
+                              {(d.score * 100).toFixed(0)}%
+                            </span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Send & Share Action Grid */}
+                <div className="mt-5 space-y-3">
+                  <span className="text-xs font-bold text-foreground uppercase tracking-wider flex items-center gap-1.5">
+                    <Share2 className="w-3.5 h-3.5 text-primary" />
+                    <span>Send & Share Photo:</span>
+                  </span>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                    {/* Download */}
+                    <button
+                      type="button"
+                      onClick={downloadCapturedPhoto}
+                      className="btn-glow inline-flex items-center justify-center gap-2 p-2.5 rounded-xl border border-border bg-card text-foreground font-semibold text-xs hover:bg-secondary transition shadow-sm"
+                    >
+                      <Download className="w-4 h-4 text-primary" />
+                      <span>Download Image</span>
+                    </button>
+
+                    {/* Copy to Clipboard */}
+                    <button
+                      type="button"
+                      onClick={copyPhotoToClipboard}
+                      className="btn-glow inline-flex items-center justify-center gap-2 p-2.5 rounded-xl border border-border bg-card text-foreground font-semibold text-xs hover:bg-secondary transition shadow-sm"
+                    >
+                      {copySuccess ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-violet-400" />}
+                      <span>{copySuccess ? "Copied!" : "Copy Image"}</span>
+                    </button>
+
+                    {/* WhatsApp */}
+                    <button
+                      type="button"
+                      onClick={shareViaWhatsApp}
+                      className="btn-glow inline-flex items-center justify-center gap-2 p-2.5 rounded-xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 font-semibold text-xs hover:bg-emerald-500/20 transition shadow-sm"
+                    >
+                      <Send className="w-4 h-4 text-emerald-400" />
+                      <span>Send WhatsApp</span>
+                    </button>
+
+                    {/* Telegram */}
+                    <button
+                      type="button"
+                      onClick={shareViaTelegram}
+                      className="btn-glow inline-flex items-center justify-center gap-2 p-2.5 rounded-xl border border-sky-500/40 bg-sky-500/10 text-sky-300 font-semibold text-xs hover:bg-sky-500/20 transition shadow-sm"
+                    >
+                      <ExternalLink className="w-4 h-4 text-sky-400" />
+                      <span>Send Telegram</span>
+                    </button>
+
+                    {/* Email */}
+                    <button
+                      type="button"
+                      onClick={shareViaEmail}
+                      className="btn-glow inline-flex items-center justify-center gap-2 p-2.5 rounded-xl border border-border bg-card text-foreground font-semibold text-xs hover:bg-secondary transition shadow-sm"
+                    >
+                      <Mail className="w-4 h-4 text-amber-400" />
+                      <span>Send Email</span>
+                    </button>
+
+                    {/* Native Web Share */}
+                    <button
+                      type="button"
+                      onClick={shareNative}
+                      className="btn-glow inline-flex items-center justify-center gap-2 p-2.5 rounded-xl gradient-cyan text-primary-foreground font-semibold text-xs shadow-md"
+                    >
+                      <Share2 className="w-4 h-4" />
+                      <span>Share Anywhere</span>
+                    </button>
+                  </div>
                 </div>
               </motion.div>
             </div>

@@ -15,5 +15,6 @@ if (fs.existsSync(indexHtml)) {
     }
     fs.copyFileSync(indexHtml, path.join(routeDir, 'index.html'));
   });
+  fs.writeFileSync(path.join(distDir, '_redirects'), '/*    /index.html   200\n');
   console.log('Successfully generated static SPA routes for:', routes.join(', '));
 }

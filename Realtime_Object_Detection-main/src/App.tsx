@@ -69,8 +69,8 @@ const AppRoutes = () => {
   const { user } = useAuth();
   const location = useLocation();
 
-  // Pages where navbar should show (protected pages)
-  const showNavbar = user && !["/", "/login", "/signup", "/forgot-password", "/reset-password"].includes(location.pathname);
+  // Pages where navbar should show (show on all app pages except standalone auth screens)
+  const showNavbar = !["/login", "/signup", "/forgot-password", "/reset-password"].includes(location.pathname);
 
   return (
     <>
@@ -80,15 +80,17 @@ const AppRoutes = () => {
           {/* Landing page - public */}
           <Route path="/" element={<Landing />} />
 
+          {/* Direct Public Detection Route - Never blocked by login */}
+          <Route path="/detection" element={<Detection />} />
+
           {/* Auth routes */}
           <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
           <Route path="/signup" element={<PublicRoute><Signup /></PublicRoute>} />
           <Route path="/forgot-password" element={<PublicRoute><ForgotPassword /></PublicRoute>} />
           <Route path="/reset-password" element={<ResetPassword />} />
 
-          {/* Protected routes */}
+          {/* Core app routes */}
           <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-          <Route path="/detection" element={<ProtectedRoute><Detection /></ProtectedRoute>} />
           <Route path="/history" element={<ProtectedRoute><History /></ProtectedRoute>} />
           <Route path="/statistics" element={<ProtectedRoute><Statistics /></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
