@@ -149,7 +149,7 @@ export class TensorFlowDetector {
     const stepY = Math.round(tileH * (1 - overlap));
 
     // Multi-Scale Multi-Aspect Slices:
-    // Slices specifically handle side-by-side persons (e.g. 2 kids on a bicycle), sitting/crouching humans, as well as tiny objects
+    // Slices specifically handle side-by-side persons, occluded background cars, sitting/crouching humans, as well as tiny objects
     const slices: { sx: number; sy: number; sw: number; sh: number }[] = [
       // Left vertical half (isolates passenger / left-seated person)
       { sx: 0, sy: 0, sw: Math.round(srcW * 0.65), sh: srcH },
@@ -159,6 +159,10 @@ export class TensorFlowDetector {
       { sx: 0, sy: 0, sw: Math.round(srcW * 0.60), sh: Math.round(srcH * 0.72) },
       // Upper-Right Human Torso & Head Cascade
       { sx: Math.round(srcW * 0.40), sy: 0, sw: Math.round(srcW * 0.60), sh: Math.round(srcH * 0.72) },
+      // Left Flank / Occluded Background Vehicle Slice (isolates cars/vehicles on left behind person)
+      { sx: 0, sy: Math.round(srcH * 0.12), sw: Math.round(srcW * 0.50), sh: Math.round(srcH * 0.88) },
+      // Right Flank / Occluded Background Vehicle Slice (isolates cars/vehicles on right behind person)
+      { sx: Math.round(srcW * 0.50), sy: Math.round(srcH * 0.15), sw: Math.round(srcW * 0.50), sh: Math.round(srcH * 0.85) },
       // Center focal zone
       {
         sx: Math.round(srcW * 0.18),
@@ -203,10 +207,13 @@ export class TensorFlowDetector {
       try {
         const tilePredictions = await this.model.detect(tileCanvas, 30, tileThreshold);
         for (const pred of tilePredictions) {
-          // If person, be slightly more permissive for occluded sitting postures
+          const lowerClass = pred.class.toLowerCase();
+          // Be permissive for occluded sitting persons and background vehicles (cars, trucks, buses, bikes)
           const minRequired =
-            pred.class.toLowerCase() === "person"
-              ? Math.max(0.12, tileThreshold * 0.85)
+            lowerClass === "person"
+              ? Math.max(0.12, tileThreshold * 0.82)
+              : ["car", "truck", "bus", "motorcycle", "bicycle"].includes(lowerClass)
+              ? Math.max(0.10, tileThreshold * 0.72)
               : tileThreshold;
 
           if (pred.score >= minRequired) {
